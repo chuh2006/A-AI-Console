@@ -1,0 +1,14 @@
+Thumbs.db
+.vscode/
+__pycache__/
+*/__pycache__/
+*.pyc
+chat_result/
+math_script/
+config.json
+*key.txt
+a.py
+assistant.py
+prompts.py
+reader.py
+kanalists.py
