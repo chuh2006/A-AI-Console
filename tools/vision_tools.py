@@ -1,7 +1,10 @@
 import json
 import pytesseract
 from PIL import Image
-pytesseract.pytesseract.tesseract_cmd = r'D:\Tesseract-OCR\tesseract.exe'
+
+with open("config.json", "r") as f:
+    config = json.load(f)
+pytesseract.pytesseract.tesseract_cmd = config["settings"]["tesseract_path"]
 
 def perform_ocr(image_path: str) -> str:
     """被大模型调用的实际本地函数"""

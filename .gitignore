@@ -12,3 +12,5 @@ assistant.py
 prompts.py
 reader.py
 kanalists.py
+!tools/reader.py
+!tools/kanalists.py

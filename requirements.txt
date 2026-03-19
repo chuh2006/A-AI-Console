@@ -1,0 +1,9 @@
+# 核心 SDK
+openai>=1.0.0
+google-genai
+# 图像处理与 OCR
+pytesseract
+Pillow
+opencv-python
+# 环境管理与工具
+python-dotenv
