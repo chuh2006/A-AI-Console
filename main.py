@@ -51,12 +51,12 @@ def main():
         chat_title = re.sub(r'\(\d+\)$', '', base_name)
         ui.display_system(f"已恢复对话，当前标题：{chat_title}")
         epoch = len([msg for msg in conversation_history if msg["role"] == "user"])
-        session = ChatSession()
+        session = ChatSession(first_time=False)
         session.history = conversation_history
         session.full_context = full_history
     else:
         system_prompt = prompts.Prompts.universe_task_prompt
-        session = ChatSession(system_prompt=system_prompt)
+        session = ChatSession(system_prompt=system_prompt, first_time=True)
         epoch = 0
         chat_title = ""
 

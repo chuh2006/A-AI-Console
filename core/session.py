@@ -1,12 +1,13 @@
 import json
 import os
 from datetime import datetime
+import tools.prompts as prompts
 
 class ChatSession:
-    def __init__(self, system_prompt: str = ""):
+    def __init__(self, system_prompt: str = "", first_time: bool = True):
         self.history = []          # 发给 API 的历史 (OpenAI 格式)
         self.full_context = []     # 用于本地保存的完整上下文
-        
+        self.full_context.append({"role": "directions", "content": prompts.Prompts.directions})
         if system_prompt:
             self.history.append({"role": "system", "content": system_prompt})
             self.full_context.append({"role": "system", "content": system_prompt})
