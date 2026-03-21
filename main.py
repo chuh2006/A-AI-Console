@@ -67,7 +67,7 @@ def main():
             ui.display_system(f"--- 第 {epoch} 轮对话 ---")
             
             # 2.1 获取用户输入
-            user_text = ui.get_user_input("请输入文本 (输入 q 退出, format 读取文件)：")
+            user_text = ui.get_user_input("请输入文本：")
             if user_text.lower() in ["q", "quit", "exit"]:
                 break
             elif user_text.lower() == "format":
@@ -98,9 +98,7 @@ def main():
             # 2.4 更新会话上下文 (写入 Session)
             session.add_user_message(content=final_user_text, original_text=user_text, images=image_paths)
 
-            # ==========================================
             # 2.5 核心通信与重试环 (安全区)
-            # ==========================================
             while True:
                 try:
                     llm_client = LLMFactory.create_client(model_name, keys)  
@@ -109,7 +107,7 @@ def main():
                     extra_kwargs = {}
                     if "gemini" in model_name:
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Google搜索工具？")
-                        extra_kwargs["think_level"] = ui.get_user_input("请输入思考等级[minimal/low/medium/high，默认medium]:") or "medium" 
+                        extra_kwargs["think_level"] = ui.get_num_choice_input("请选择思考层级：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"}) 
                     elif "qwen" in model_name:
                         extra_kwargs["isQwenThinking"] = ui.get_boolean_input("是否启用Qwen思考功能？") 
                     # 获取流生成器
@@ -126,7 +124,7 @@ def main():
 
                 except Exception or KeyboardInterrupt as e:
                     ui.display_error(f"请求过程中发生错误: {e}")
-                    if ui.get_boolean_input("是否重新发起本次请求？"):
+                    if ui.get_boolean_input("是否重新发起本次请求？", default=True):
                         ui.display_system("正在重试...")
                         continue  # 留在当前内层循环，重新请求
                     else:
@@ -139,9 +137,7 @@ def main():
             if not answer:
                 continue
 
-            # ==========================================
             # 2.6 针对回答的随机化处理
-            # ==========================================
             is_a_random = ui.get_boolean_input("回答是否加随机？")
             final_answer = answer
             if is_a_random:

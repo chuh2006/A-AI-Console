@@ -2,7 +2,7 @@ import os
 import time
 import random
 import string
-import kanalists
+import tools.kanalists as kanalists
 
 HIRAGANA = kanalists.getHIRAGANA()
 KATAKANA = kanalists.getKATAKANA()

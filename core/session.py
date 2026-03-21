@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime
 import tools.prompts as prompts
 
@@ -83,6 +84,13 @@ class ChatSession:
             self.history = [self.history[0]] + self.history[3:]
 
     def save_to_disk(self, title: str):
+        if title:
+            # Normalize any user-provided path-like title to a safe filename stem.
+            safe_title = os.path.basename(title.strip())
+            safe_title = os.path.splitext(safe_title)[0]
+            safe_title = re.sub(r'[\\/*?:"<>|]', '', safe_title)
+            title = safe_title.strip()
+
         if not title:
             title = "chat_" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         

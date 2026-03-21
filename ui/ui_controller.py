@@ -24,22 +24,20 @@ class UIController:
     def get_user_input(self, prompt: str = "请输入文本：") -> str:
         return input(prompt).strip()
     
+    def get_num_choice_input(self, prompt: str, choice_map: Dict[str, str]) -> str:
+        """通用的数字选项输入器，choice_map 是一个从数字字符串到选项描述的映射"""
+        print(prompt)
+        for key, value in (choice_map or {}).items():
+            print(f"{key}: {value}")
+        
+        while True:
+            user_input = input("请输入文本> ").strip()
+            if user_input.isdigit() and user_input in choice_map:
+                return choice_map[user_input]
+            self.display_warning("无效输入，请输入有效的数字选项。")
+
     def get_model_choice(self) -> str:
-        menu = (
-            "可用模型：\n"
-            "0:自己回答 \n1:DeepSeek V3.2 Chat\n2:DeepSeek V3.2 Reasoner \n"
-            "3:multi-assistant \n4:帮我选择 \n5:错误消息 \n6:数学模型 \n"
-            "7:Gemini 3.1 Flash-Lite Preview \n8:Gemini 3 Flash Preview\n"
-            "9:Gemini 3.1 Pro Preview\n10:Qwen 3.5 Plus\n请输入文本> "
-        )
-        choice = input(menu).strip()
-        try:
-            if int(choice) not in range(0, 11):
-                raise ValueError
-        except ValueError:
-            self.display_warning("无效的选择，请重新选择。")
-            return self.get_model_choice()  # 递归调用直到用户输入有效选项
-        return self.model_map.get(choice, "deepseek-chat")  # 默认使用 deepseek-chat
+        return self.get_num_choice_input("请选择模型：", self.model_map)
     
     def get_image_input(self, model_name: str) -> List[str]:
         is_image = input("是否输入图片[y/N]：").strip().lower() == 'y'
@@ -75,9 +73,18 @@ class UIController:
             
         return path_list
     
-    def get_boolean_input(self, prompt: str) -> bool:
+    def get_boolean_input(self, prompt: str, default: bool = False) -> bool:
         """通用的 Yes/No 询问器"""
-        return input(f"{prompt}[y/N]: ").strip().lower() == 'y'
+        reminder = "[Y/n]" if default else "[y/N]"
+        while True:
+            user_input = input(f"{prompt}{reminder}: ").strip().lower()
+            if user_input == "":
+                return default
+            if user_input in {"y", "yes"}:
+                return True
+            if user_input in {"n", "no"}:
+                return False
+            self.display_warning("请输入 y/yes 或 n/no。")
     
     def render_stream(self, stream: Generator[Dict[str, Any], None, None]) -> Tuple[str, str, Dict]:
         """

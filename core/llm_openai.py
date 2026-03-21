@@ -63,7 +63,7 @@ class OpenAICompatibleClient(BaseLLMClient):
             tools=tools if tools else None
         )
         tool_calls_buffer = {}
-        begin_time = time.time() if "reasoner" in self.model_name or is_qwen_thinking else None
+        begin_time = time.time() if "reasoner" in self.model_name or "qwen" in self.model_name else None
         
         # ====================================================
         # 第一轮流式处理 (带 Tool Call 截获)
