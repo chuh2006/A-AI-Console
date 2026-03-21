@@ -41,7 +41,7 @@ class OpenAICompatibleClient(BaseLLMClient):
                 for p, txt in zip(image_paths, ocr_results):
                     yield {"type": "meta_ocr", "image_path": p, "ocr_text": txt}
 
-        extra_body = {"enable_thinking": is_qwen_thinking} if is_qwen and is_qwen_thinking else None
+        extra_body = {"enable_thinking": is_qwen_thinking} if is_qwen else None
 
         def run_api(msgs, active_tools):
             return client.chat.completions.create(

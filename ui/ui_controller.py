@@ -18,7 +18,10 @@ class UIController:
             "7": "gemini-3.1-flash-lite-preview",
             "8": "gemini-3-flash-preview",
             "9": "gemini-3.1-pro-preview",
-            "10": "qwen3.5-plus"
+            "10": "qwen3.5-plus",
+            "11": "doubao-seed-2-0-pro-260215",
+            "12": "doubao-seed-2-0-lite-260215",
+            "13": "doubao-seed-2-0-mini-260215"
             }
 
     def get_user_input(self, prompt: str = "请输入文本：") -> str:
@@ -39,6 +42,19 @@ class UIController:
     def get_model_choice(self) -> str:
         return self.get_num_choice_input("请选择模型：", self.model_map)
     
+    def get_en_or_disable_or_auto_input(self, prompt: str) -> str:
+        """获取启用/禁用/自动选项的输入，返回 'enabled'、'disabled' 或 'auto'"""
+        options = {"1": "enabled", "2": "disabled", "3": "auto"}
+        print(prompt)
+        for key, value in options.items():
+            print(f"{key}: {value}")
+        
+        while True:
+            user_input = input("请输入文本> ").strip()
+            if user_input in options:
+                return options[user_input]
+            self.display_warning("无效输入，请输入 1、2 或 3。")
+    
     def get_image_input(self, model_name: str) -> List[str]:
         is_image = input("是否输入图片[y/N]：").strip().lower() == 'y'
         if not is_image:
@@ -49,7 +65,7 @@ class UIController:
             # Qwen 目前在 OpenAI 兼容模式下仅支持 URL
             image_path = input("仅支持网图，请输入图片URL(多个用逗号分隔)：").replace('"', '').replace("'", "")
             path_list = [p.strip() for p in image_path.replace('，', ',').split(',') if p.strip()]
-        elif "gemini" in model_name:
+        elif "gemini" or "doubao" in model_name:
             # Gemini 支持本地文件
             image_path = input("请输入图片本地文件路径(多个用逗号分隔)：").replace('"', '').replace("'", "")
             raw_paths = [p.strip() for p in image_path.replace('，', ',').split(',') if p.strip()]
@@ -91,7 +107,7 @@ class UIController:
         消费底层 LLM 传来的流式数据，负责优雅地打印到终端。
         返回 (最终答案, 思考过程, 元数据字典)
         """
-        print("助手：", end="", flush=True)
+        self.display_system(msg="已收到 AI 回执，正在生成回答\n", is_flush=True)
         
         final_answer = ""
         thought_content = ""
@@ -139,7 +155,7 @@ class UIController:
         # 补充打印耗时信息
         thinking_time = meta_info.get("thinking_time", -1.0)
         if thinking_time > 0:
-            print(f"\033[90m(总耗时: {thinking_time:.2f}秒)\033[0m")
+            print(f"\033[90m(思考耗时: {thinking_time:.2f}秒)\033[0m")
             
         return final_answer, thought_content, meta_info
     
@@ -151,9 +167,9 @@ class UIController:
         """标准化的错误输出（红色）"""
         print(f"\033[91m[E] {msg}\033[0m")
 
-    def display_system(self, msg: str):
+    def display_system(self, msg: str, is_flush: bool = False):
         """标准化的系统提示（蓝色）"""
-        print(f"\033[94m[S] {msg}\033[0m")
+        print(f"\033[94m[S] {msg}\033[0m", flush=is_flush)
 
     def start_spinner(self, msg: str = "处理中", delay: float = 0.12) -> threading.Event:
         stop_event = threading.Event()

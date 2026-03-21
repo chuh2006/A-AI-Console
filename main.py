@@ -107,9 +107,12 @@ def main():
                     extra_kwargs = {}
                     if "gemini" in model_name:
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Google搜索工具？")
-                        extra_kwargs["think_level"] = ui.get_num_choice_input("请选择思考层级：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"}) 
+                        extra_kwargs["think_level"] = ui.get_num_choice_input("请选择思考层级(minimal不代表一定不思考；high不代表一定思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"}) 
                     elif "qwen" in model_name:
-                        extra_kwargs["isQwenThinking"] = ui.get_boolean_input("是否启用Qwen思考功能？") 
+                        extra_kwargs["isQwenThinking"] = ui.get_boolean_input("是否启用Qwen思考功能？(启用后会整体提高回答质量，但是对用户强制纠正或者未知答案的问题容易陷入死循环，不建议开启。或者说千问这个模型本身就不建议使用。)\n请输入文本")
+                    elif "doubao" in model_name:
+                        extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
+                        extra_kwargs["reasoningEffort"] = ui.get_num_choice_input("请选择思考深度(minimal为关闭思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"})
                     # 获取流生成器
                     stream = llm_client.chat_stream(
                         messages=session.get_history(),
@@ -122,8 +125,18 @@ def main():
                     # 走到这里说明网络请求完整无误地结束了
                     break 
 
-                except Exception or KeyboardInterrupt as e:
+                except Exception as e:
                     ui.display_error(f"请求过程中发生错误: {e}")
+                    if ui.get_boolean_input("是否重新发起本次请求？", default=True):
+                        ui.display_system("正在重试...")
+                        continue  # 留在当前内层循环，重新请求
+                    else:
+                        ui.display_warning("已取消重试。撤销刚才的问题。")
+                        session.rollback_last_user_message() # 回滚状态
+                        answer = None # 标记为失败
+                        break
+                except KeyboardInterrupt:
+                    ui.display_warning("\n检测到强制中断 (Ctrl+C)。")
                     if ui.get_boolean_input("是否重新发起本次请求？", default=True):
                         ui.display_system("正在重试...")
                         continue  # 留在当前内层循环，重新请求
@@ -169,6 +182,6 @@ def main():
     filepath = session.save_to_disk(title=chat_title)
     ui.display_system(f"已保存至：{os.path.abspath(filepath)}")
     ui.stop_all_spinners()
-
+    
 if __name__ == "__main__":
     main()
