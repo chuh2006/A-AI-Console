@@ -1,6 +1,8 @@
 # 核心 SDK
 openai>=1.0.0
 google-genai
+"volcengine-python-sdk[ark]"
+dashscope
 # 图像处理与 OCR
 pytesseract
 Pillow
