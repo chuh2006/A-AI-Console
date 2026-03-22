@@ -11,7 +11,8 @@ class OpenAICompatibleClient(BaseLLMClient):
         
         # 1. 处理请求参数和特殊结构
         is_qwen = "qwen" in self.model_name
-        is_qwen_thinking = kwargs.get("isQwenThinking", False)
+        qwen_thinking_state = kwargs.get("isQwenThinking", "auto")
+
         is_deepseek_chat = self.model_name == "deepseek-chat"
         
         # 深拷贝以防修改原始 Session 中的历史记录
@@ -40,8 +41,8 @@ class OpenAICompatibleClient(BaseLLMClient):
                 # 抛出元数据，好让 Session 去保存
                 for p, txt in zip(image_paths, ocr_results):
                     yield {"type": "meta_ocr", "image_path": p, "ocr_text": txt}
-
-        extra_body = {"enable_thinking": is_qwen_thinking} if is_qwen else None
+        if is_qwen:
+            extra_body = {"enable_thinking": True} if qwen_thinking_state == "enabled" else {"enable_thinking": False} if qwen_thinking_state == "disabled" else {}
 
         def run_api(msgs, active_tools):
             return client.chat.completions.create(

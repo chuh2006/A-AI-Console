@@ -1,5 +1,6 @@
 import time
 import pathlib
+import json
 from typing import Generator, Dict, Any, List
 from .llm_base import BaseLLMClient
 from volcenginesdkarkruntime import Ark
@@ -58,6 +59,8 @@ class VolcengineClient(BaseLLMClient):
 
         begin_time = time.time()
         isThinking = False
+        search_queries = []
+        search_sources = []
 
         for event in response:
             if isinstance(event, ResponseReasoningSummaryTextDeltaEvent):
@@ -69,6 +72,14 @@ class VolcengineClient(BaseLLMClient):
                     yield {"type": "meta", "thinking_time": think_time}
                     isThinking = False
                 yield {"type": "content", "content": event.delta}
+            elif hasattr(event, 'type'):
+                if event.type == 'response.output_item.added':
+                    if hasattr(event.item, "type") and event.item.type == 'function_call':
+                        arguments = json.loads(event.item.arguments)
+                        search_query = arguments.get('query')
+                        search_source = arguments.get('sources')
+                        search_queries.append(search_query)
+                        search_sources.append(search_source)
             else:
                 continue
 
@@ -77,5 +88,7 @@ class VolcengineClient(BaseLLMClient):
                 client.files.delete(file_id=file_id)
         except Exception as e:
             yield {"type": "system", "content": f"未能删除上传的文件，可能会占用存储空间。错误详情: {e}"}
+
+        yield {"type": "meta", "think_level": reasoning_effort, "uris": search_sources, "search_keywords": search_queries}
 
         client.close()

@@ -1,0 +1,88 @@
+import os
+import pathlib
+from dashscope import MultiModalConversation
+import dashscope 
+import time
+from .llm_base import BaseLLMClient
+from typing import Dict, Generator, List
+
+class QwenClient(BaseLLMClient):
+    def chat_stream(self, messages: List[Dict[str, str | list]], temperature: float, image_paths: List[str] = None, **kwargs) -> Generator[Dict[str, str], None, None]:
+        def _safe_get(obj, key, default=None):
+            if obj is None:
+                return default
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            try:
+                return getattr(obj, key)
+            except (AttributeError, KeyError, TypeError):
+                return default
+
+        req_messages = [msg.copy() for msg in messages]
+        if image_paths:
+            last_content = req_messages[-1]["content"]
+            new_content = [{"text": last_content}]
+            for img_path in image_paths:
+                path_url = pathlib.Path(img_path).resolve().as_uri()
+                # DashScope expects Windows drive-letter file URIs as file://C:/...
+                if os.name == "nt" and path_url.startswith("file:///") and len(path_url) > 10 and path_url[8].isalpha() and path_url[9] == ":":
+                    path_url = "file://" + path_url[8:]
+                new_content.append({"image": path_url})
+            req_messages[-1]["content"] = new_content
+
+        thinking_state = kwargs.get("isQwenThinking", "auto")
+        enable_thinking = True if thinking_state == "enabled" else False if thinking_state == "disabled" else None
+        enable_search = kwargs.get("enable_search", False)
+        search_strategy = kwargs.get("search_strategy", None)
+
+        responses = MultiModalConversation.call(
+            api_key=self.api_key,
+            model=self.model_name,
+            messages=req_messages,
+            temperature=temperature,
+            stream=True,
+            enable_thinking=enable_thinking,
+            thinking_budget=10240,
+            incremental_output=True,
+            enable_search=enable_search,
+            search_strategy=search_strategy,
+        )
+        
+        is_thinking = False
+        begin_time = time.time()
+        search_info = None
+
+        for response in responses:
+            output = _safe_get(response, 'output', None)
+            if not output:
+                continue
+
+            search_info = _safe_get(output, 'search_info', None) if search_info is None else search_info
+            choices = _safe_get(output, 'choices', [])
+            if choices:
+                message = _safe_get(choices[0], 'message', None)
+                if message:
+                    reasoning_content = _safe_get(message, 'reasoning_content', None)
+                    if reasoning_content:
+                        is_thinking = True
+                        yield {"type": "thinking", "content": reasoning_content}
+                    raw_content = _safe_get(message, 'content', None)
+                    text_content = ""
+                    if isinstance(raw_content, list):
+                        for item in raw_content:
+                            text_content += _safe_get(item, 'text', '')
+                    elif isinstance(raw_content, str):
+                        text_content = raw_content
+                    if text_content:
+                        if is_thinking:
+                            think_time = time.time() - begin_time
+                            yield {"type": "meta", "thinking_time": think_time}
+                            is_thinking = False
+                        yield {"type": "content", "content": text_content}
+
+        search_results = []
+        if search_info:
+            for web in search_info["search_results"]:
+                search_results.append(f"[{web['title']}]({web['url']})")
+
+        yield {"type": "meta", "uris": search_results}

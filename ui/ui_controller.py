@@ -59,13 +59,9 @@ class UIController:
         is_image = input("是否输入图片[y/N]：").strip().lower() == 'y'
         if not is_image:
             return []
-
         path_list = []
-        if "qwen" in model_name:
-            # Qwen 目前在 OpenAI 兼容模式下仅支持 URL
-            image_path = input("仅支持网图，请输入图片URL(多个用逗号分隔)：").replace('"', '').replace("'", "")
-            path_list = [p.strip() for p in image_path.replace('，', ',').split(',') if p.strip()]
-        elif "gemini" or "doubao" in model_name:
+
+        if "gemini" or "doubao" or "qwen" in model_name:
             # Gemini 支持本地文件
             image_path = input("请输入图片本地文件路径(多个用逗号分隔)：").replace('"', '').replace("'", "")
             raw_paths = [p.strip() for p in image_path.replace('，', ',').split(',') if p.strip()]
@@ -86,6 +82,7 @@ class UIController:
                     self.display_warning(f"无法读取图片文件：{p}，请检查路径。")
         else:
             self.display_warning(f"当前模型 {model_name} 暂不支持图片输入。")
+            path_list = []
             
         return path_list
     
@@ -149,6 +146,9 @@ class UIController:
             elif chunk_type == "system":
                 # 打印系统级别的提示（比如上传图片的进度）
                 print(f"\033[94m[S] {content}\033[0m", end="", flush=True)
+
+            elif chunk_type == "input":
+                final_answer = self.get_user_input(prompt="请自己回答：")
 
         print("\n", end="") # 流结束换行
         

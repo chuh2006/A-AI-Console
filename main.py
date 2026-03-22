@@ -40,6 +40,7 @@ def main():
     # 1. 初始配置阶段
     ui.display_system("系统初始化完成，已加载配置文件。")
     use_history = ui.get_boolean_input("是否基于历史记录进行对话？")
+    isRollBack = False
 
     if use_history:
         file_name = ui.get_user_input("请输入要读取的历史记录文件名（在chat_result目录下）：")
@@ -63,7 +64,8 @@ def main():
     # 2. 主事件循环
     while True:
         try:
-            epoch += 1
+            epoch += 1 if not isRollBack else 0
+            isRollBack = False
             ui.display_system(f"--- 第 {epoch} 轮对话 ---")
             
             # 2.1 获取用户输入
@@ -109,7 +111,10 @@ def main():
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Google搜索工具？")
                         extra_kwargs["think_level"] = ui.get_num_choice_input("请选择思考层级(minimal不代表一定不思考；high不代表一定思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"}) 
                     elif "qwen" in model_name:
-                        extra_kwargs["isQwenThinking"] = ui.get_boolean_input("是否启用Qwen思考功能？(启用后会整体提高回答质量，但是对用户强制纠正或者未知答案的问题容易陷入死循环，不建议开启。或者说千问这个模型本身就不建议使用。)\n请输入文本")
+                        extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
+                        if extra_kwargs["enable_search"]:
+                            extra_kwargs["search_strategy"] = ui.get_num_choice_input("请设置设置搜索量级策略", {"1": "turbo", "2": "max", "3": "agent", "4": "agent_max"})
+                        extra_kwargs["isQwenThinking"] = ui.get_en_or_disable_or_auto_input("是否启用Qwen思考功能？(启用后会整体提高回答质量，但是对用户强制纠正或者未知答案的问题容易陷入死循环，不建议开启。或者说千问这个模型本身就不建议使用。)\n请输入文本")
                     elif "doubao" in model_name:
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
                         extra_kwargs["reasoningEffort"] = ui.get_num_choice_input("请选择思考深度(minimal为关闭思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"})
@@ -134,6 +139,7 @@ def main():
                         ui.display_warning("已取消重试。撤销刚才的问题。")
                         session.rollback_last_user_message() # 回滚状态
                         answer = None # 标记为失败
+                        isRollBack = True
                         break
                 except KeyboardInterrupt:
                     ui.display_warning("\n检测到强制中断 (Ctrl+C)。")
@@ -144,6 +150,7 @@ def main():
                         ui.display_warning("已取消重试。撤销刚才的问题。")
                         session.rollback_last_user_message() # 回滚状态
                         answer = None # 标记为失败
+                        isRollBack = True
                         break
             
             # 如果 answer 为 None，说明用户取消了重试，直接跳过后续处理，进入下一轮

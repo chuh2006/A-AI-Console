@@ -48,6 +48,8 @@ class ChatSession:
                 for ocr_item in meta["ocr_results"]:
                     ocr_log = f"**读取目标:** `{ocr_item['image_path']}`\n**提取结果:**\n```text\n{ocr_item['ocr_text']}\n```"
                     self.full_context.append({"role": "tool_ocr_extraction", "content": ocr_log})
+            if meta.get("search_keywords"):
+                self.full_context.append({"role": "search_keywords", "content": str(meta.get("search_keywords"))})
             
         if thinking:
             self.full_context.append({"role": "assistant_thinking", "content": thinking})
