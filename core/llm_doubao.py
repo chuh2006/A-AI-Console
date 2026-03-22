@@ -1,6 +1,5 @@
 import time
 import pathlib
-import json
 from typing import Generator, Dict, Any, List
 from .llm_base import BaseLLMClient
 from volcenginesdkarkruntime import Ark
@@ -62,6 +61,38 @@ class VolcengineClient(BaseLLMClient):
         search_queries = []
         search_sources = []
 
+        def _append_unique(values: list[str], value: str | None):
+            if value and value not in values:
+                values.append(value)
+
+        def _collect_url_citation(annotation: Any):
+            if not annotation:
+                return
+            anno_type = getattr(annotation, "type", None)
+            if anno_type != "url_citation":
+                return
+            url = getattr(annotation, "url", None)
+            title = getattr(annotation, "title", None) or url
+            if url:
+                _append_unique(search_sources, f"[{title}]({url})")
+
+        def _collect_from_output_item(item: Any):
+            if not item:
+                return
+
+            # Web Search 的查询词在 web_search_call.action.query
+            if getattr(item, "type", None) == "web_search_call":
+                action = getattr(item, "action", None)
+                if action:
+                    _append_unique(search_queries, getattr(action, "query", None))
+
+            # 输出文本里的注释会携带 url_citation（标题+链接）
+            content = getattr(item, "content", None) or []
+            for part in content:
+                annotations = getattr(part, "annotations", None) or []
+                for annotation in annotations:
+                    _collect_url_citation(annotation)
+
         for event in response:
             if isinstance(event, ResponseReasoningSummaryTextDeltaEvent):
                 isThinking = True
@@ -73,13 +104,11 @@ class VolcengineClient(BaseLLMClient):
                     isThinking = False
                 yield {"type": "content", "content": event.delta}
             elif hasattr(event, 'type'):
-                if event.type == 'response.output_item.added':
-                    if hasattr(event.item, "type") and event.item.type == 'function_call':
-                        arguments = json.loads(event.item.arguments)
-                        search_query = arguments.get('query')
-                        search_source = arguments.get('sources')
-                        search_queries.append(search_query)
-                        search_sources.append(search_source)
+                # 根据 Responses API 事件模型提取搜索关键词与引用链接
+                if event.type in ('response.output_item.added', 'response.output_item.done'):
+                    _collect_from_output_item(getattr(event, 'item', None))
+                elif event.type == 'response.output_text.annotation.added':
+                    _collect_url_citation(getattr(event, 'annotation', None))
             else:
                 continue
 
