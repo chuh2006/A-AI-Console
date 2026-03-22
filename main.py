@@ -127,7 +127,7 @@ def main():
                     # 我们将它们作为 kwargs 传给 client
                     extra_kwargs = {}
                     if "gemini" in model_name:
-                        extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Google搜索工具？")
+                        extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
                         extra_kwargs["think_level"] = ui.get_num_choice_input("请选择思考层级(minimal不代表一定不思考；high不代表一定思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"}) 
                     elif "qwen" in model_name:
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")

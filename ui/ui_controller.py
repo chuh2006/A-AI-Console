@@ -3,6 +3,8 @@ import itertools
 import threading
 from typing import Generator, Dict, Any, Tuple, List
 import os
+import uuid
+from datetime import datetime
 from PIL import ImageGrab, Image
 import shutil
 
@@ -56,14 +58,34 @@ class UIController:
             if user_input in options:
                 return options[user_input]
             self.display_warning("无效输入，请输入 1、2 或 3。")
+
+    def _get_chat_result_image_dir(self) -> str:
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        date_dir = datetime.now().strftime("%Y-%m-%d")
+        image_dir = os.path.join(project_root, "chat_result", "imgs", date_dir)
+        os.makedirs(image_dir, exist_ok=True)
+        return image_dir
+
+    def _generate_unique_image_name(self, extension: str = ".png") -> str:
+        ext = (extension or ".png").lower()
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        # 文件名无空格，并使用 UUID 保证唯一性
+        return f"img_{uuid.uuid4().hex}{ext}"
+
+    def _save_image_to_chat_result(self, source_path: str, image_dir: str, valid_extensions: Tuple[str, ...]) -> str:
+        _, ext = os.path.splitext(source_path)
+        ext = ext.lower() if ext and ext.lower() in valid_extensions else ".png"
+        target_path = os.path.join(image_dir, self._generate_unique_image_name(ext))
+        shutil.copy2(source_path, target_path)
+        return target_path
     
     def get_image_input(self, model_name: str) -> List[str]:
         is_image = input("是否输入图片[y/N]：").strip().lower() == 'y'
         if not is_image:
             return []
         path_list = []
-        temp_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "temp", "clipboard_image.png")
-        temp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "temp")
+        image_dir = self._get_chat_result_image_dir()
         valid_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')
 
         if "gemini" in model_name or "doubao" in model_name or "qwen" in model_name or "deepseek" in model_name:
@@ -72,25 +94,30 @@ class UIController:
                 if isinstance(clipboard_content, Image.Image):
                     use_clipboard_img = self.get_boolean_input("检测到剪贴板中有图片，是否使用剪贴板图片？", True)
                     if use_clipboard_img:
-                        clipboard_content.save(temp_path)
-                        path_list.append(temp_path)
+                        target_path = os.path.join(image_dir, self._generate_unique_image_name(".png"))
+                        clipboard_content.save(target_path)
+                        path_list.append(target_path)
                 elif isinstance(clipboard_content, list):
-                    for i, file_path in enumerate(clipboard_content):
+                    clipboard_files = []
+                    for file_path in clipboard_content:
                         if os.path.isfile(file_path) and file_path.lower().endswith(valid_extensions):
-                            temp_path_with_idx = os.path.join(os.path.dirname(os.path.dirname(__file__)), "temp", f"clipboard_image_{i}.png")
-                            shutil.copy2(file_path, temp_path_with_idx)
+                            clipboard_files.append(file_path)
                     use_clipboard_img = self.get_boolean_input("检测到剪贴板中有图片，是否使用剪贴板图片？", True)
                     if use_clipboard_img:
-                        for img in os.listdir(temp_dir):
-                            if img.startswith("clipboard_image_") and img.endswith(".png"):
-                                path_list.append(os.path.join(temp_dir, img))
+                        for file_path in clipboard_files:
+                            saved_path = self._save_image_to_chat_result(file_path, image_dir, valid_extensions)
+                            path_list.append(saved_path)
 
             # 本地文件
             image_path = input("请输入图片本地文件路径(多个用逗号分隔)：").replace('"', '').replace("'", "")
             raw_paths = [p.strip() for p in image_path.replace('，', ',').split(',') if p.strip()]
             for p in raw_paths:
                 if os.path.exists(p):
-                    path_list.append(p)
+                    if os.path.isfile(p) and p.lower().endswith(valid_extensions):
+                        saved_path = self._save_image_to_chat_result(p, image_dir, valid_extensions)
+                        path_list.append(saved_path)
+                    else:
+                        self.display_warning(f"图片格式不支持或路径不是文件：{p}")
                 else:
                     self.display_warning(f"无法读取图片文件：{p}，请检查路径。")
         else:
