@@ -17,7 +17,7 @@ def load_config() -> dict:
     if not os.path.exists(config_path):
         # 如果文件不存在，给个默认模板并提示
         default_config = {
-            "api_keys": {"deepseek": "", "gemini": "", "qwen": ""},
+            "api_keys": {"deepseek": "", "gemini": "", "qwen": "", "doubao": ""},
             "settings": {"default_temperature": 1.0}
         }
         with open(config_path, "w", encoding="utf-8") as f:
