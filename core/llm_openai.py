@@ -41,6 +41,7 @@ class OpenAICompatibleClient(BaseLLMClient):
                 # 抛出元数据，好让 Session 去保存
                 for p, txt in zip(image_paths, ocr_results):
                     yield {"type": "meta_ocr", "image_path": p, "ocr_text": txt}
+        extra_body = None
         if is_qwen:
             extra_body = {"enable_thinking": True} if qwen_thinking_state == "enabled" else {"enable_thinking": False} if qwen_thinking_state == "disabled" else {}
 
@@ -51,7 +52,7 @@ class OpenAICompatibleClient(BaseLLMClient):
                 temperature=temperature,
                 stream=True,
                 tools=active_tools,
-                extra_body=extra_body
+                extra_body=extra_body if is_qwen else None
             )
 
         # 2. 发起流式请求

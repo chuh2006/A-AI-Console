@@ -29,6 +29,17 @@ def load_config() -> dict:
 
 def main():
     ui = UIController()
+    def clean_temp_directory():
+        temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+        if os.path.exists(temp_dir):
+            for file in os.listdir(temp_dir):
+                file_path = os.path.join(temp_dir, file)
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                except Exception as e:
+                    ui.display_warning(f"清理文件失败 {file_path}: {e}")
+    clean_temp_directory()
     try:
         config = load_config()
         keys = config.get("api_keys", {})
@@ -37,6 +48,13 @@ def main():
         ui.display_error(str(e))
         return
     
+    # 0. 目录存在性检查
+    required_dirs = ["chat_result", "temp"]
+    for d in required_dirs:
+        dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), d)
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
+
     # 1. 初始配置阶段
     ui.display_system("系统初始化完成，已加载配置文件。")
     use_history = ui.get_boolean_input("是否基于历史记录进行对话？")
@@ -64,6 +82,7 @@ def main():
     # 2. 主事件循环
     while True:
         try:
+            clean_temp_directory()
             epoch += 1 if not isRollBack else 0
             isRollBack = False
             ui.display_system(f"--- 第 {epoch} 轮对话 ---")
@@ -180,6 +199,9 @@ def main():
             if image_paths and not ui.get_boolean_input("是否继续使用上次的图片进行对话？"):
                 image_paths = []
 
+            # 清理 temp 目录下的文件
+            clean_temp_directory()
+
         except KeyboardInterrupt:
             ui.display_warning("\n检测到强制中断 (Ctrl+C)。")
             break
@@ -189,6 +211,7 @@ def main():
     filepath = session.save_to_disk(title=chat_title)
     ui.display_system(f"已保存至：{os.path.abspath(filepath)}")
     ui.stop_all_spinners()
+    clean_temp_directory()
     
 if __name__ == "__main__":
     main()

@@ -3,6 +3,8 @@ import itertools
 import threading
 from typing import Generator, Dict, Any, Tuple, List
 import os
+from PIL import ImageGrab, Image
+import shutil
 
 class UIController:
     def __init__(self):
@@ -60,19 +62,30 @@ class UIController:
         if not is_image:
             return []
         path_list = []
+        temp_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "temp", "clipboard_image.png")
+        temp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "temp")
+        valid_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')
 
-        if "gemini" or "doubao" or "qwen" in model_name:
-            # Gemini 支持本地文件
-            image_path = input("请输入图片本地文件路径(多个用逗号分隔)：").replace('"', '').replace("'", "")
-            raw_paths = [p.strip() for p in image_path.replace('，', ',').split(',') if p.strip()]
-            
-            # 这里调用你在原文件里的文件存在性检查逻辑
-            for p in raw_paths:
-                if os.path.exists(p):
-                    path_list.append(p)
-                else:
-                    self.display_warning(f"无法读取图片文件：{p}，请检查路径。")
-        elif "deepseek" in model_name:
+        if "gemini" in model_name or "doubao" in model_name or "qwen" in model_name or "deepseek" in model_name:
+            clipboard_content = ImageGrab.grabclipboard()
+            if clipboard_content is not None:
+                if isinstance(clipboard_content, Image.Image):
+                    use_clipboard_img = self.get_boolean_input("检测到剪贴板中有图片，是否使用剪贴板图片？", True)
+                    if use_clipboard_img:
+                        clipboard_content.save(temp_path)
+                        path_list.append(temp_path)
+                elif isinstance(clipboard_content, list):
+                    for i, file_path in enumerate(clipboard_content):
+                        if os.path.isfile(file_path) and file_path.lower().endswith(valid_extensions):
+                            temp_path_with_idx = os.path.join(os.path.dirname(os.path.dirname(__file__)), "temp", f"clipboard_image_{i}.png")
+                            shutil.copy2(file_path, temp_path_with_idx)
+                    use_clipboard_img = self.get_boolean_input("检测到剪贴板中有图片，是否使用剪贴板图片？", True)
+                    if use_clipboard_img:
+                        for img in os.listdir(temp_dir):
+                            if img.startswith("clipboard_image_") and img.endswith(".png"):
+                                path_list.append(os.path.join(temp_dir, img))
+
+            # 本地文件
             image_path = input("请输入图片本地文件路径(多个用逗号分隔)：").replace('"', '').replace("'", "")
             raw_paths = [p.strip() for p in image_path.replace('，', ',').split(',') if p.strip()]
             for p in raw_paths:
