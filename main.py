@@ -8,6 +8,7 @@ import tools.prompts as prompts
 from tools.utils import read_local_file, spawnRandomContext, getRandomSpawnerDescriptionContext
 from tools.title_generator import generate_auto_title
 import tools.reader as reader
+from tools import costum_expections
 
 def load_config() -> dict:
     """读取 main.py 同级目录下的 config.json"""
@@ -94,10 +95,22 @@ def main():
             elif user_text.lower() == "format":
                 filepath = ui.get_user_input("请输入文件路径：")
                 user_text = read_local_file(filepath)
+            elif user_text.lower() == "autoask":
+                try:
+                    question = session.get_question(keys.get("deepseek", ""))
+                    ui.display_system(f"自动提问生成成功: {question}")
+                    use_question = ui.get_boolean_input("是否使用自动提问的结果作为输入？")
+                    if use_question:
+                        user_text = question
+                    else:
+                        user_text = ui.get_user_input("请重新输入文本：")
+                except costum_expections.AutoAskerException as e:
+                    ui.display_error(f"自动提问生成失败: {e}")
+                    user_text = ui.get_user_input("请重新输入文本：")
             session.add_epoch_count(epoch)  # 记录轮次到 Session
             if epoch == 1 and not chat_title:
                 ui.display_system("正在根据您的输入生成对话标题...")
-                ds_key = keys.get("deepseek") 
+                ds_key = keys.get("deepseek")
                 generated_title = generate_auto_title(ds_key, user_text)
                 if generated_title:
                     chat_title = generated_title

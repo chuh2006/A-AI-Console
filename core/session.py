@@ -3,6 +3,7 @@ import os
 import re
 from datetime import datetime
 import tools.prompts as prompts
+import tools.auto_asker as auto_asker
 
 class ChatSession:
     def __init__(self, system_prompt: str = "", first_time: bool = True):
@@ -12,6 +13,21 @@ class ChatSession:
         if system_prompt:
             self.history.append({"role": "system", "content": system_prompt})
             self.full_context.append({"role": "system", "content": system_prompt})
+
+    def get_asker_context(self) -> list[dict]:
+        context = []
+        role_map = {"user": "assistant", "assistant": "user"}
+        for msg in self.history:
+            if msg["role"] in ["user", "assistant"]:
+                context.append({"role": role_map[msg["role"]], "content": msg["content"]})
+        return context
+    
+    def get_question(self, api_key: str) -> str:
+        asker_context = self.get_asker_context()
+        if not asker_context:
+            return ""
+        question = auto_asker.get_question(api_key, asker_context)
+        return question
 
     def add_epoch_count(self, epoch: int):
         """记录当前轮次，格式为 epoch_count: {epoch}"""
