@@ -4,6 +4,8 @@ import threading
 from typing import Generator, Dict, Any, Tuple, List
 import os
 import uuid
+import hashlib
+import io
 from datetime import datetime
 from PIL import ImageGrab, Image
 import shutil
@@ -73,11 +75,63 @@ class UIController:
         # 文件名无空格，并使用 UUID 保证唯一性
         return f"img_{uuid.uuid4().hex}{ext}"
 
-    def _save_image_to_chat_result(self, source_path: str, image_dir: str, valid_extensions: Tuple[str, ...]) -> str:
+    def _hash_file(self, file_path: str) -> str:
+        hasher = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _build_image_hash_index(self, image_dir: str, valid_extensions: Tuple[str, ...]) -> Dict[str, str]:
+        hash_index: Dict[str, str] = {}
+        if not os.path.isdir(image_dir):
+            return hash_index
+
+        for name in os.listdir(image_dir):
+            file_path = os.path.join(image_dir, name)
+            if not os.path.isfile(file_path):
+                continue
+            if not name.lower().endswith(valid_extensions):
+                continue
+            try:
+                file_hash = self._hash_file(file_path)
+                hash_index[file_hash] = file_path
+            except Exception:
+                # 单个文件异常不影响整体流程
+                continue
+        return hash_index
+
+    def _save_image_with_dedup(
+        self,
+        source_path: str,
+        image_dir: str,
+        valid_extensions: Tuple[str, ...],
+        hash_index: Dict[str, str]
+    ) -> str:
+        file_hash = self._hash_file(source_path)
+        existing_path = hash_index.get(file_hash)
+        if existing_path:
+            return existing_path
+        
         _, ext = os.path.splitext(source_path)
         ext = ext.lower() if ext and ext.lower() in valid_extensions else ".png"
         target_path = os.path.join(image_dir, self._generate_unique_image_name(ext))
         shutil.copy2(source_path, target_path)
+        saved_path = target_path
+        hash_index[file_hash] = saved_path
+        return saved_path
+
+    def _save_clipboard_image_with_dedup(self, image_obj: Image.Image, image_dir: str, hash_index: Dict[str, str]) -> str:
+        buffer = io.BytesIO()
+        image_obj.save(buffer, format="PNG")
+        image_hash = hashlib.sha256(buffer.getvalue()).hexdigest()
+        existing_path = hash_index.get(image_hash)
+        if existing_path:
+            return existing_path
+
+        target_path = os.path.join(image_dir, self._generate_unique_image_name(".png"))
+        image_obj.save(target_path)
+        hash_index[image_hash] = target_path
         return target_path
     
     def get_image_input(self, model_name: str) -> List[str]:
@@ -87,6 +141,12 @@ class UIController:
         path_list = []
         image_dir = self._get_chat_result_image_dir()
         valid_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')
+        hash_index = self._build_image_hash_index(image_dir, valid_extensions)
+
+        def append_unique_path(target_path: str):
+            if target_path in path_list:
+                return
+            path_list.append(target_path)
 
         if "gemini" in model_name or "doubao" in model_name or "qwen" in model_name or "deepseek" in model_name:
             clipboard_content = ImageGrab.grabclipboard()
@@ -94,9 +154,8 @@ class UIController:
                 if isinstance(clipboard_content, Image.Image):
                     use_clipboard_img = self.get_boolean_input("检测到剪贴板中有图片，是否使用剪贴板图片？", True)
                     if use_clipboard_img:
-                        target_path = os.path.join(image_dir, self._generate_unique_image_name(".png"))
-                        clipboard_content.save(target_path)
-                        path_list.append(target_path)
+                        target_path = self._save_clipboard_image_with_dedup(clipboard_content, image_dir, hash_index)
+                        append_unique_path(target_path)
                 elif isinstance(clipboard_content, list):
                     clipboard_files = []
                     for file_path in clipboard_content:
@@ -105,8 +164,8 @@ class UIController:
                     use_clipboard_img = self.get_boolean_input("检测到剪贴板中有图片，是否使用剪贴板图片？", True)
                     if use_clipboard_img:
                         for file_path in clipboard_files:
-                            saved_path = self._save_image_to_chat_result(file_path, image_dir, valid_extensions)
-                            path_list.append(saved_path)
+                            saved_path = self._save_image_with_dedup(file_path, image_dir, valid_extensions, hash_index)
+                            append_unique_path(saved_path)
 
             # 本地文件
             image_path = input("请输入图片本地文件路径(多个用逗号分隔)：").replace('"', '').replace("'", "")
@@ -114,8 +173,8 @@ class UIController:
             for p in raw_paths:
                 if os.path.exists(p):
                     if os.path.isfile(p) and p.lower().endswith(valid_extensions):
-                        saved_path = self._save_image_to_chat_result(p, image_dir, valid_extensions)
-                        path_list.append(saved_path)
+                        saved_path = self._save_image_with_dedup(p, image_dir, valid_extensions, hash_index)
+                        append_unique_path(saved_path)
                     else:
                         self.display_warning(f"图片格式不支持或路径不是文件：{p}")
                 else:
