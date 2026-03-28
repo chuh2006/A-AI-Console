@@ -9,14 +9,15 @@ import io
 from datetime import datetime
 from PIL import ImageGrab, Image
 import shutil
+from tools.documents_reader import DocumentParser, UnsupportedFileFormatError
 
 class UIController:
     def __init__(self):
         self._spinner_registry = []
         self.model_map = {
             "0": "自己回答",
-            "1": "deepseek-chat",
-            "2": "deepseek-reasoner",
+            "1": "default",
+            "2": "deepseek",
             "3": "multi-assistant",
             "4": "帮我选择",
             "5": "错误消息",
@@ -185,6 +186,18 @@ class UIController:
             
         return path_list
     
+    def get_text_file_input(self) -> str:
+        file_path = input("请输入文件路径：").replace('"', '').replace("'", "").strip()
+        if not os.path.exists(file_path):
+            self.display_warning("文件不存在。")
+            return ""
+        try:
+            return DocumentParser().parse(file_path)
+        except UnsupportedFileFormatError as e:
+            self.display_warning(str(e))
+            return self.get_text_file_input()
+
+
     def get_boolean_input(self, prompt: str, default: bool = False) -> bool:
         """通用的 Yes/No 询问器"""
         reminder = "[Y/n]" if default else "[y/N]"
@@ -248,6 +261,9 @@ class UIController:
 
             elif chunk_type == "input":
                 final_answer = self.get_user_input(prompt="请自己回答：")
+            
+            elif chunk_type == "error_msg":
+                final_answer = self.get_user_input(prompt="请输入错误消息：")
 
         print("\n", end="") # 流结束换行
         

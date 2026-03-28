@@ -122,6 +122,9 @@ def main():
             # 2.2 获取模型与图片
             model_name = ui.get_model_choice()
             image_paths = ui.get_image_input(model_name)
+            text_file_text = ui.get_text_file_input() if ui.get_boolean_input("是否上传文件？") else None
+            if text_file_text:
+                user_text += "\n\n用户随附了文件：\n<file>" + text_file_text + "</file>"
 
             # 2.3 针对问题的随机化处理
             is_q_random = ui.get_boolean_input("问题是否加随机？")
@@ -136,9 +139,6 @@ def main():
             # 2.5 核心通信与重试环 (安全区)
             while True:
                 try:
-                    llm_client = LLMFactory.create_client(model_name, keys)  
-                    # 提示：如果是 Gemini，这里你可能还需要通过 UI 获取 enable_search 和 think_level
-                    # 我们将它们作为 kwargs 传给 client
                     extra_kwargs = {}
                     if "gemini" in model_name:
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
@@ -151,6 +151,13 @@ def main():
                     elif "doubao" in model_name:
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
                         extra_kwargs["reasoningEffort"] = ui.get_num_choice_input("请选择思考深度(minimal为关闭思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"})
+                    elif "deepseek" in model_name:
+                        if ui.get_boolean_input("是否启用DeepSeek思考", default=True):
+                            model_name = "deepseek-reasoner"
+                        else:
+                            model_name = "deepseek-chat"
+
+                    llm_client = LLMFactory.create_client(model_name, keys)
                     # 获取流生成器
                     stream = llm_client.chat_stream(
                         messages=session.get_history(),
@@ -161,7 +168,7 @@ def main():
                     # 将流交给 UI 渲染
                     answer, thinking, meta = ui.render_stream(stream)   
                     # 走到这里说明网络请求完整无误地结束了
-                    break 
+                    break
 
                 except Exception as e:
                     ui.display_error(f"请求过程中发生错误: {e}")
