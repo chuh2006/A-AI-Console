@@ -19,7 +19,7 @@ def load_config() -> dict:
         # 如果文件不存在，给个默认模板并提示
         default_config = {
             "api_keys": {"deepseek": "", "gemini": "", "qwen": "", "doubao": ""},
-            "settings": {"default_temperature": 1.0}
+            "settings": {"default_temperature": 1.0, "enable_system_prompt": False}
         }
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(default_config, f, indent=4)
@@ -45,6 +45,7 @@ def main():
         config = load_config()
         keys = config.get("api_keys", {})
         temperature = config.get("settings", {}).get("default_temperature", 1.0)
+        enable_system_prompt = config.get("settings", {}).get("enable_system_prompt", True)
     except Exception as e:
         ui.display_error(str(e))
         return
@@ -71,12 +72,12 @@ def main():
         chat_title = re.sub(r'\(\d+\)$', '', base_name)
         ui.display_system(f"已恢复对话，当前标题：{chat_title}")
         epoch = len([msg for msg in conversation_history if msg["role"] == "user"])
-        session = ChatSession(first_time=False)
+        session = ChatSession(first_time=False, enable_system_prompt=False)
         session.history = conversation_history
         session.full_context = full_history
     else:
         system_prompt = prompts.Prompts.universe_task_prompt
-        session = ChatSession(system_prompt=system_prompt, first_time=True)
+        session = ChatSession(system_prompt=system_prompt, first_time=True, enable_system_prompt=enable_system_prompt)
         epoch = 0
         chat_title = ""
 
