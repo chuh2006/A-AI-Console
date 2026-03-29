@@ -39,7 +39,7 @@ class OpenAICompatibleClient(BaseLLMClient):
 
         if using_kimi and kwargs.get("enable_thinking", False):
             pass # Kimi 默认开启思考功能，无需额外配置
-        else:
+        elif using_kimi and not kwargs.get("enable_thinking", False):
             extra_body.update({"thinking": {"type": "disabled"}})
         kimi_thinking_enabled = using_kimi and kwargs.get("enable_thinking", False)
 
