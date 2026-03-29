@@ -186,15 +186,18 @@ def main():
                         break
                 except KeyboardInterrupt:
                     ui.display_warning("\n检测到强制中断 (Ctrl+C)。")
-                    if ui.get_boolean_input("是否重新发起本次请求？", default=True):
+                    choice = ui.get_num_choice_input_num("是否要重试请求？", {"1": "保留消息并重试", "2": "重新输入消息并回滚", "3": "退出"})
+                    if choice == "1":
                         ui.display_system("正在重试...")
                         continue  # 留在当前内层循环，重新请求
-                    else:
+                    elif choice == "2":
                         ui.display_warning("已取消重试。撤销刚才的问题。")
                         session.rollback_last_user_message() # 回滚状态
                         answer = None # 标记为失败
                         isRollBack = True
                         break
+                    else:
+                        raise KeyboardInterrupt  # 退出整个程序
             
             # 如果 answer 为 None，说明用户取消了重试，直接跳过后续处理，进入下一轮
             if not answer:

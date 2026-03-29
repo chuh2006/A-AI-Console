@@ -46,6 +46,24 @@ class UIController:
                 return choice_map[user_input]
             self.display_warning("无效输入，请输入有效的数字选项。")
 
+    def get_num_choice_input_num(self, prompt: str, choice_map: Dict[str, str]) -> str:
+        """通用的数字选项输入器，choice_map 是一个从数字字符串到选项描述的映射，但是返回用户输入的数字字符串，而不是映射后的值"""
+        print(prompt)
+        for key, value in (choice_map or {}).items():
+            print(f"{key}: {value}")
+        
+        while True:
+            user_input = input("请输入文本> ").strip()
+            if user_input.isdigit() and user_input in choice_map:
+                return user_input
+            elif user_input.isdigit() == False and user_input in choice_map.values():
+                # 允许用户直接输入选项描述来选择
+                for key, value in choice_map.items():
+                    if user_input.strip().lower() == value.strip().lower():
+                        return key
+                
+            self.display_warning("无效输入，请输入有效的数字选项。")
+
     def get_model_choice(self) -> str:
         return self.get_num_choice_input("请选择模型：", self.model_map)
     
@@ -276,15 +294,21 @@ class UIController:
     
     def display_warning(self, msg: str):
         """标准化的警告输出（黄色）"""
-        print(f"\033[93m[W] {msg}\033[0m")
+        if msg.startswith("\n"):
+            print(f"\033[93m[W] {msg}\033[0m", end="")
+        print(f"\n\033[93m[W] {msg}\033[0m")
 
     def display_error(self, msg: str):
         """标准化的错误输出（红色）"""
-        print(f"\033[91m[E] {msg}\033[0m")
+        if msg.startswith("\n"):
+            print(f"\033[91m[E] {msg}\033[0m", end="")
+        print(f"\n\033[91m[E] {msg}\033[0m")
 
     def display_system(self, msg: str, is_flush: bool = False):
         """标准化的系统提示（蓝色）"""
-        print(f"\033[94m[S] {msg}\033[0m", flush=is_flush)
+        if msg.startswith("\n"):
+            print(f"\033[94m[S] {msg}\033[0m", end="", flush=is_flush)
+        print(f"\n\033[94m[S] {msg}\033[0m", flush=is_flush)
 
     def start_spinner(self, msg: str = "处理中", delay: float = 0.12) -> threading.Event:
         stop_event = threading.Event()
