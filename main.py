@@ -29,6 +29,7 @@ def load_config() -> dict:
         return json.load(f)
 
 def main():
+    force_quit = False
     ui = UIController()
     def clean_temp_directory():
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
@@ -231,10 +232,13 @@ def main():
 
         except KeyboardInterrupt:
             ui.display_warning("\n检测到强制中断 (Ctrl+C)。")
+            force_quit = True
             break
 
     # 3. 程序退出清理
     ui.display_system("会话结束，正在保存记录...")
+    if force_quit:
+        ui.display_warning("最新一轮对话仅会保留用户输入")
     filepath = session.save_to_disk(title=chat_title)
     ui.display_system(f"已保存至：{os.path.abspath(filepath)}")
     ui.stop_all_spinners()
