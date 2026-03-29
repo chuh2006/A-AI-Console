@@ -18,7 +18,14 @@ def load_config() -> dict:
     if not os.path.exists(config_path):
         # 如果文件不存在，给个默认模板并提示
         default_config = {
-            "api_keys": {"deepseek": "", "gemini": "", "qwen": "", "doubao": "", "tavily": "(如果deepseek需要启用搜索功能，此处必填)"},
+            "api_keys": {
+                "deepseek": "",
+                "gemini": "",
+                "qwen": "",
+                "doubao": "",
+                "tavily": "(如果deepseek需要启用搜索功能，此处必填)",
+                "kimi": ""
+                },
             "settings": {"default_temperature": 1.0, "enable_system_prompt": False}
         }
         with open(config_path, "w", encoding="utf-8") as f:
@@ -160,7 +167,9 @@ def main():
                         if ui.get_boolean_input("是否启用联网搜索？"):
                             extra_kwargs["enable_search"] = True
                             extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"}) if "reasoner" in model_name else "minimal"
-
+                    elif "kimi" in model_name:
+                        extra_kwargs["enable_thinking"] = ui.get_boolean_input("是否启用Kimi思考功能？", default=True)
+                        extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Kimi联网搜索？")
                     llm_client = LLMFactory.create_client(model_name, keys)
                     # 获取流生成器
                     stream = llm_client.chat_stream(

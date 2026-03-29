@@ -16,5 +16,7 @@ class LLMFactory:
             return VolcengineClient(api_key=keys["doubao"], model_name=model_name, base_url="https://ark.cn-beijing.volces.com/api/v3")
         elif "deepseek" in model_name:
             return OpenAICompatibleClient(api_key=keys["deepseek"], model_name=model_name, base_url="https://api.deepseek.com")
+        elif "kimi" in model_name:
+            return OpenAICompatibleClient(api_key=keys["kimi"], model_name=model_name, base_url="https://api.moonshot.cn/v1")
         else:
-            return DefaultClient(api_key="", model_name=model_name, base_url=type)  # base_url 这里我们暂时用来传递模型类型
+            return DefaultClient(api_key="", model_name=model_name, base_url="")

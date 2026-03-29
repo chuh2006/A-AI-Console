@@ -28,7 +28,8 @@ class UIController:
             "10": "qwen3.5-plus",
             "11": "doubao-seed-2-0-pro-260215",
             "12": "doubao-seed-2-0-lite-260215",
-            "13": "doubao-seed-2-0-mini-260215"
+            "13": "doubao-seed-2-0-mini-260215",
+            "14": "kimi-k2.5"
             }
 
     def get_user_input(self, prompt: str = "请输入文本：") -> str:
