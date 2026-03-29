@@ -1,11 +1,15 @@
 # 核心 SDK
 openai>=1.0.0
 google-genai
-"volcengine-python-sdk[ark]"
+volcengine-python-sdk[ark]
 dashscope
 # 图像处理与 OCR
 pytesseract
 Pillow
 opencv-python
+# 文档读取与搜索工具
+PyMuPDF
+python-docx
+tavily-python
 # 环境管理与工具
 python-dotenv
