@@ -158,7 +158,7 @@ def main():
                             model_name = "deepseek-chat"
                         if ui.get_boolean_input("是否启用联网搜索？"):
                             extra_kwargs["enable_search"] = True
-                            extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"})
+                            extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"}) if "reasoner" in model_name else "minimal"
 
                     llm_client = LLMFactory.create_client(model_name, keys)
                     # 获取流生成器

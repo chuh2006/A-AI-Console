@@ -32,8 +32,8 @@ class OpenAICompatibleClient(BaseLLMClient):
             max_iterations = reasoning_effort_map.get(max_iterations_str, 2)
         
         extra_body = None
-          # ★ 安全机制：最大工具调用轮数，防止模型陷入死循环
         loop_count = 0
+        begin_time = time.time() if "reasoner" in self.model_name or "qwen" in self.model_name else None
 
         # ====================================================
         # 进入多轮 Tool Calling 循环
@@ -49,8 +49,6 @@ class OpenAICompatibleClient(BaseLLMClient):
                 extra_body=extra_body,
                 tools=tools if tools else None
             )
-            
-            begin_time = time.time() if "reasoner" in self.model_name or "qwen" in self.model_name else None
             
             # 初始化当前轮次的缓存
             tool_calls_buffer = {}
