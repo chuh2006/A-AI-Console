@@ -13,9 +13,5 @@ reader.py
 kanalists.py
 !tools/reader.py
 !tools/kanalists.py
-!old_ver/a.py
-!old_ver/assistant.py
-!old_ver/reader.py
-!old_ver/kanalists.py
-!old_ver/prompts.py
 temp/
+old_ver/
