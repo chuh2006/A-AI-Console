@@ -118,6 +118,9 @@ class VolcengineClient(BaseLLMClient):
         except Exception as e:
             yield {"type": "system", "content": f"未能删除上传的文件，可能会占用存储空间。错误详情: {e}"}
 
-        yield {"type": "meta", "think_level": reasoning_effort, "uris": search_sources, "search_keywords": search_queries}
+        if reasoning_effort == "minimal":
+            reasoning_effort = None  # 后端不区分 minimal 和 None，前端展示时也不特别标注 minimal，保持简洁
+            
+        yield {"type": "meta", "think_level": reasoning_effort if reasoning_effort is not None else None, "uris": search_sources, "search_keywords": search_queries}
 
         client.close()

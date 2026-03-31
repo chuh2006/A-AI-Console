@@ -2,11 +2,14 @@ from typing import Dict, Generator, List
 import json
 from openai import OpenAI
 import time
+import os
+import base64
 from .llm_base import BaseLLMClient
 from tools.vision_tools import ocr_tool_schema, perform_ocr
 from tools.web_search_ds import web_search_tool_schema, search_web
 from tools.prompts import Prompts
 from tools.kimi_tools import kimi_web_search_tool_schema, search_impl
+from tools.time_get import time_tool_schema, get_time
 
 class OpenAICompatibleClient(BaseLLMClient):
     def chat_stream(self, messages: List[Dict[str, str | list]], temperature: float, image_paths: List[str] = None, **kwargs) -> Generator[Dict[str, str], None, None]:
@@ -18,9 +21,7 @@ class OpenAICompatibleClient(BaseLLMClient):
 
         # 深拷贝以防修改原始 Session 中的历史记录
         req_messages = [msg.copy() for msg in messages]
-        if using_deepseek:
-            req_messages.insert(0, {"role": "system", "content": Prompts.universe_task_prompt})  # 注入系统提示词，让deepseek知道今天是几号。
-        tools = []
+        tools = [time_tool_schema] if using_deepseek else []
         extra_body = {}
 
         # 统一处理：让模型自主决定是否调用 OCR
@@ -34,13 +35,22 @@ class OpenAICompatibleClient(BaseLLMClient):
                 temperature = None  # Kimi-K2.5 固定温度，强制关闭采样
             elif temperature >= 1.0:
                 temperature = 1.0  # Kimi 温度上限为 1.0
+            if kwargs.get("enable_thinking", False):
+                pass # Kimi 默认开启思考功能，无需额外配置
+            elif not kwargs.get("enable_thinking", True): # 用户显式要求关闭思考功能
+                extra_body.update({"thinking": {"type": "disabled"}})
+            if image_paths:
+                last_msg = req_messages[-1]["content"]
+                new_msg = [{"type": "text", "text": last_msg}]
+                for path in image_paths:
+                    with open(path, "rb") as f:
+                        image_data = f.read()
+                    img_url = f"data:image/{os.path.splitext(path)[1]};base64,{base64.b64encode(image_data).decode('utf-8')}"
+                    new_msg.append({"type": "image_url", "image_url": {"url": img_url}})
+                req_messages[-1]["content"] = new_msg
 
         max_iterations = 1 if tools else 0 # 默认不启用工具循环，除非至少有一个工具被添加
 
-        if using_kimi and kwargs.get("enable_thinking", False):
-            pass # Kimi 默认开启思考功能，无需额外配置
-        elif using_kimi and not kwargs.get("enable_thinking", False):
-            extra_body.update({"thinking": {"type": "disabled"}})
         kimi_thinking_enabled = using_kimi and kwargs.get("enable_thinking", False)
 
         # 添加网络搜索工具
@@ -142,7 +152,7 @@ class OpenAICompatibleClient(BaseLLMClient):
 
                 # 执行工具
                 for tc in tool_calls_list:
-                    if loop_count > max_iterations:
+                    if loop_count > max_iterations and tc["function"]["name"] != "get_time":
                         tc["function"]["name"] = "max_tool_calls_exceeded"
                     if tc["function"]["name"] == "perform_ocr":
                         try:
@@ -151,7 +161,7 @@ class OpenAICompatibleClient(BaseLLMClient):
                         except json.JSONDecodeError:
                             target_path = ""
                         
-                        yield {"type": "system", "content": f"\n\033[94m[第 {loop_count} 轮 | 请求工具] 正在提取图片文本: {target_path}...\033[0m\n"}
+                        yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 正在提取图片文本: {target_path}...\033[0m\n"}
                         ocr_result = perform_ocr(target_path)
                         yield {"type": "system", "content": f"\033[93m[本地OCR返回结果]: {ocr_result[:50]}...\033[0m\n"}
                         
@@ -183,12 +193,20 @@ class OpenAICompatibleClient(BaseLLMClient):
                     elif tc["function"]["name"] == "$web_search":  # Kimi 内置搜索工具
                         arguments = json.loads(tc["function"]["arguments"])
                         tool_result = search_impl(arguments)
-                        yield {"type": "system", "content": f"\n\033[94m[第 {loop_count} 轮 | 请求工具] Kimi 内置搜索工具\033[0m\n"}
+                        yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] Kimi 内置搜索工具\033[0m\n"}
                         req_messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "name": tc["function"]["name"],
                             "content": json.dumps(tool_result["arguments"])
+                        })
+                    elif tc["function"]["name"] == "get_time":
+                        tool_result = get_time()
+                        loop_count -= 1  # 时间工具不计入迭代次数限制
+                        req_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": tool_result
                         })
 
                     elif tc["function"]["name"] == "max_tool_calls_exceeded":

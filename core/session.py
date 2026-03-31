@@ -46,6 +46,11 @@ class ChatSession:
         self.history.append({"role": "user", "content": content})
         self.full_context.append({"role": "user", "content": content})
         self._auto_clean_context()
+    
+    def add_enabled_tools(self, tools: list[str]):
+        """记录本轮对话中启用的工具列表"""
+        if tools:
+            self.full_context.append({"role": "enabled_tools", "content": str(tools)})
 
     def add_assistant_message(self, content: str, original_content: str = None, thinking: str = "", model_name: str = "", meta: dict = None):
         """记录助手输出，包括元数据（耗时、搜索链接、思考等级）和随机化前的原文本"""

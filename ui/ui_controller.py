@@ -35,20 +35,24 @@ class UIController:
     def get_user_input(self, prompt: str = "请输入文本：") -> str:
         return input(prompt).strip()
     
-    def get_num_choice_input(self, prompt: str, choice_map: Dict[str, str]) -> str:
-        """通用的数字选项输入器，choice_map 是一个从数字字符串到选项描述的映射"""
+    def get_num_choice_input(self, prompt: str, choice_map: Dict[str, str], default_num_choice: str = None) -> str:
+        """通用的数字选项输入器，choice_map 是一个从数字字符串到选项描述的映射
+        default_num_choice 是默认选项对应的数字字符串，如果用户直接回车则选择默认选项"""
         print(prompt)
         for key, value in (choice_map or {}).items():
             print(f"{key}: {value}")
-        
+
         while True:
             user_input = input("请输入文本> ").strip()
             if user_input.isdigit() and user_input in choice_map:
                 return choice_map[user_input]
+            elif default_num_choice is not None and (user_input == "" or user_input is None):
+                return default_num_choice
             self.display_warning("无效输入，请输入有效的数字选项。")
 
-    def get_num_choice_input_num(self, prompt: str, choice_map: Dict[str, str]) -> str:
-        """通用的数字选项输入器，choice_map 是一个从数字字符串到选项描述的映射，但是返回用户输入的数字字符串，而不是映射后的值"""
+    def get_num_choice_input_num(self, prompt: str, choice_map: Dict[str, str], default_num_choice: str = None) -> str:
+        """通用的数字选项输入器，choice_map 是一个从数字字符串到选项描述的映射，但是返回用户输入的数字字符串，而不是映射后的值
+        default_num_choice 是默认选项对应的数字字符串，如果用户直接回车则选择默认选项"""
         print(prompt)
         for key, value in (choice_map or {}).items():
             print(f"{key}: {value}")
@@ -57,6 +61,8 @@ class UIController:
             user_input = input("请输入文本> ").strip()
             if user_input.isdigit() and user_input in choice_map:
                 return user_input
+            elif default_num_choice is not None and (user_input == "" or user_input is None):
+                return default_num_choice
             elif user_input.isdigit() == False and user_input in choice_map.values():
                 # 允许用户直接输入选项描述来选择
                 for key, value in choice_map.items():
@@ -168,7 +174,7 @@ class UIController:
                 return
             path_list.append(target_path)
 
-        if "gemini" in model_name or "doubao" in model_name or "qwen" in model_name or "deepseek" in model_name:
+        if "gemini" in model_name or "doubao" in model_name or "qwen" in model_name or "deepseek" in model_name or "kimi" in model_name:
             clipboard_content = ImageGrab.grabclipboard()
             if clipboard_content is not None:
                 if isinstance(clipboard_content, Image.Image):

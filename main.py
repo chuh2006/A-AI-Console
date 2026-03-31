@@ -118,7 +118,7 @@ def main():
                     user_text = ui.get_user_input("请重新输入文本：")
             session.add_epoch_count(epoch)  # 记录轮次到 Session
             if epoch == 1 and not chat_title:
-                ui.display_system("正在根据您的输入生成对话标题...")
+                ui.display_system("正在根据您的输入生成对话标题...") 
                 ds_key = keys.get("deepseek")
                 generated_title = generate_auto_title(ds_key, user_text)
                 if generated_title:
@@ -170,6 +170,12 @@ def main():
                     elif "kimi" in model_name:
                         extra_kwargs["enable_thinking"] = ui.get_boolean_input("是否启用Kimi思考功能？", default=True)
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Kimi联网搜索？")
+
+                    # 获取启用的工具列表
+                    enabled_tools = []
+                    if extra_kwargs.get("enable_search"):
+                        enabled_tools.append("web_search")
+                    session.add_enabled_tools(enabled_tools)  # 记录启用的工具到 Session
                     llm_client = LLMFactory.create_client(model_name, keys)
                     # 获取流生成器
                     stream = llm_client.chat_stream(
@@ -195,7 +201,7 @@ def main():
                         isRollBack = True
                         break
                 except KeyboardInterrupt:
-                    ui.display_warning("\n检测到强制中断 (Ctrl+C)。")
+                    ui.display_warning("检测到强制中断 (Ctrl+C)。")
                     choice = ui.get_num_choice_input_num("是否要重试请求？", {"1": "保留消息并重试", "2": "重新输入消息并回滚", "3": "退出"})
                     if choice == "1":
                         ui.display_system("正在重试...")

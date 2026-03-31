@@ -101,12 +101,13 @@ class Prompts:
                   "- `assistant_thinking`：模型的内在思考过程（仅限支持思考过程的模型）。\n"
                   "- `assistant_thinking_time`：模型思考耗时，单位为秒。\n"
                   "- `search_results_links`：如果模型在回答过程中进行了搜索，此字段记录相关链接列表。\n"
-                  "- `thinking_level`：Gemini 模型独有，包括 `minimal` `low` `medium` `high` 四个级别。注意 `minimal` 不代表模型一定不思考，`high` 也不代表模型一定会思考。"
+                  "- `thinking_level`：包括 `minimal` `low` `medium` `high` 四个级别。注意 `minimal` 不代表模型一定不思考，`high` 也不代表模型一定会思考(仅 Gemini)。"
                   "- `image_uploaded`：如果模型在回答过程中上传了图片，此字段渲染图片。\n"
-                  "- `user_original` / `assistant_original`：启用随机化时，`user` 和 `assistant_answer` 中会混入随机字符串；此两字段保存未加扰的原始内容。\n\n"
+                  "- `user_original` / `assistant_original`：启用随机化时，`user` 和 `assistant_answer` 中会混入随机字符串；此两字段保存未加扰的原始内容。\n"
+                  "- `enabled_tools`：所有工具启动与否完全由用户控制，此字段记录本轮对话中启用的工具列表。\n\n"
                   "**其他说明：**\n"
                   "- 同一目录下若存在 `<title>_full_context.md`，则包含更详细的中间步骤和调试信息，格式相同。\n"
-                  "- 若本次使用了 `multi-assistant` 模型，本文件仅记录第一个和最后一个模型的对话摘要，中间模型的详细输出保存在 `full_context` 中。")
+                  "- 若本次使用了 `multi-assistant` 模型，本文件仅记录第一个和最后一个模型的对话，中间模型的详细输出保存在 `full_context` 中。")
     
     testing_prompt = """
 
