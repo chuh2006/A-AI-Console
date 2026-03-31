@@ -4,6 +4,7 @@ from .llm_base import BaseLLMClient
 from .llm_doubao import VolcengineClient
 from .llm_qwen import QwenClient
 from .llm_default import DefaultClient
+from .multi_assistant import MultiAssistant
 
 class LLMFactory:
     @staticmethod
@@ -18,5 +19,20 @@ class LLMFactory:
             return OpenAICompatibleClient(api_key=keys["deepseek"], model_name=model_name, base_url="https://api.deepseek.com")
         elif "kimi" in model_name:
             return OpenAICompatibleClient(api_key=keys["kimi"], model_name=model_name, base_url="https://api.moonshot.cn/v1")
+        elif "multi-assistant" in model_name:
+            multi_keys = {
+                provider: keys.get(provider, "")
+                for provider in ["deepseek", "qwen", "doubao", "kimi"]
+                if keys.get(provider)
+            }
+            return MultiAssistant(
+                api_keys=multi_keys,
+                model_name=model_name,
+                base_urls={
+                    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "doubao": "https://ark.cn-beijing.volces.com/api/v3",
+                    "deepseek": "https://api.deepseek.com",
+                    "kimi": "https://api.moonshot.cn/v1"
+                    })
         else:
             return DefaultClient(api_key="", model_name=model_name, base_url="")

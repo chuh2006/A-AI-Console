@@ -18,7 +18,7 @@ class UIController:
             "0": "自己回答",
             "1": "default",
             "2": "deepseek",
-            "3": "multi-assistant",
+            "3": "multi-assistant-old-preview",
             "4": "帮我选择",
             "5": "错误消息",
             "6": "math-model",

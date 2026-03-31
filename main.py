@@ -170,6 +170,8 @@ def main():
                     elif "kimi" in model_name:
                         extra_kwargs["enable_thinking"] = ui.get_boolean_input("是否启用Kimi思考功能？", default=True)
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Kimi联网搜索？")
+                    elif "multi-assistant" in model_name:
+                        ui.display_warning("multi-assistant 目前处于预览阶段，完全由AI生成代码，并且从未测试，可能存在不稳定和不可预知的表现，请谨慎选择。可直接 Ctrl+C 重新选择模型")
 
                     # 获取启用的工具列表
                     enabled_tools = []
