@@ -89,6 +89,8 @@ class ChatSession:
         """如果请求彻底失败且用户放弃重试，将最后一条用户消息从历史中弹出，防止污染下一次对话"""
         if self.history and self.history[-1]["role"] == "user":
             self.history.pop()
+        if self.full_context and self.full_context[-1]["role"] == "user":
+            self.full_context.pop()
 
     def get_history(self) -> list:
         return self.history.copy()
