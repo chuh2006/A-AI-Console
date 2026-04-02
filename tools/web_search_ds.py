@@ -26,20 +26,27 @@ def search_web(queries: list[str]) -> dict:
     tavily_client = TavilyClient(api_key=get_tavily_key())
     all_results_str = ""
     extracted_sources = []
+    e = None  # 定义一个变量来捕获异常信息
 
     for q in queries:
-        try:
-            # 限制单次搜索条数，避免多个词加起来导致 Token 爆炸
-            response = tavily_client.search(query=q, max_results=int(get_max_result_count())) 
-            
-            all_results_str += f"【搜索词：{q} 的结果】\n"
-            for item in response.get("results", []):
-                all_results_str += f"标题: {item['title']}\n内容: {item['content']}\n\n"
-                extracted_sources.append(f"[{item['title']}]({item['url']})")
+        retry_count = 0
+        retry = True
+        while retry_count < 3 and retry:
+            try:
+                # 限制单次搜索条数，避免多个词加起来导致 Token 爆炸
+                response = tavily_client.search(query=q, max_results=int(get_max_result_count())) 
 
-        except Exception as e:
-            all_results_str += f"【搜索词：{q} 的结果】搜索失败: {str(e)}\n\n"
-            
+                all_results_str += f"【搜索词：{q} 的结果】\n"
+                for item in response.get("results", []):
+                    all_results_str += f"标题: {item['title']}\n内容: {item['content']}\n\n"
+                    extracted_sources.append(f"[{item['title']}]({item['url']})")
+                retry = False  # 成功获取结果，跳出重试循环
+                break  # 成功获取结果，跳出重试循环
+            except Exception as e:
+                e = e  # 捕获异常信息
+                retry_count += 1
+        if retry:
+            all_results_str += f"【搜索词：{q} 的结果】\n搜索失败，错误信息: {str(e)}\n\n"
     return {
         "results": all_results_str if all_results_str.strip() else "本次工具调用失败或未搜索到相关结果。",
         "sources": extracted_sources

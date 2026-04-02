@@ -21,7 +21,7 @@ class OpenAICompatibleClient(BaseLLMClient):
 
         # 深拷贝以防修改原始 Session 中的历史记录
         req_messages = [msg.copy() for msg in messages]
-        tools = [time_tool_schema] if using_deepseek else []
+        tools = []
         extra_body = {}
 
         # 统一处理：让模型自主决定是否调用 OCR
@@ -57,6 +57,7 @@ class OpenAICompatibleClient(BaseLLMClient):
         if kwargs.get("enable_search", False):
             if using_deepseek:
                 tools.append(web_search_tool_schema)
+                tools.append(time_tool_schema)
                 reasoning_effort_map = {"minimal": 1, "low": 2, "medium": 4, "high": 5, "max": 8, "unlimited": 10}
                 max_iterations_str = kwargs.get("searchEffort", "low")
                 max_iterations = reasoning_effort_map.get(max_iterations_str, 2)
