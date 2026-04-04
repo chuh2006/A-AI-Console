@@ -11,9 +11,22 @@ from PIL import ImageGrab, Image
 import shutil
 from tools.documents_reader import DocumentParser, UnsupportedFileFormatError
 
+try:
+    from prompt_toolkit import prompt as toolkit_prompt
+    from prompt_toolkit.completion import PathCompleter, WordCompleter
+except ImportError:
+    toolkit_prompt = None
+    PathCompleter = None
+    WordCompleter = None
+
 class UIController:
     def __init__(self):
         self._spinner_registry = []
+        self.chat_commands = {
+            "/quit": "退出当前对话",
+            "/format": "从本地文件读取文本作为输入",
+            "/autoask": "自动生成提问内容",
+        }
         self.model_map = {
             "0": "自己回答",
             "1": "default",
@@ -33,7 +46,92 @@ class UIController:
             }
 
     def get_user_input(self, prompt: str = "请输入文本：") -> str:
+        return self._read_input(prompt)
+
+    def get_chat_input(self, prompt: str = "请输入文本") -> Dict[str, str]:
+        """获取支持 / 命令的聊天输入。"""
+        input_prompt = f"{prompt}> "
+        command_completer = WordCompleter(list(self.chat_commands.keys()), ignore_case=True) if WordCompleter else None
+
+        while True:
+            raw_input = self._read_input(input_prompt, completer=command_completer)
+            if not raw_input:
+                return {"kind": "text", "text": "", "command": "", "argument": ""}
+
+            normalized = raw_input.strip()
+            command_name, command_argument = self._split_command(normalized)
+
+            if command_name in {"quit", "q", "exit"}:
+                return {"kind": "command", "text": "", "command": "quit", "argument": command_argument}
+
+            if command_name == "format":
+                file_path = command_argument or self._prompt_file_path("请输入文件路径：")
+                if not file_path:
+                    self.display_warning("未提供文件路径，请重新输入。")
+                    continue
+                file_text = self._read_plain_text_file(file_path)
+                if file_text == "":
+                    continue
+                return {"kind": "command", "text": file_text, "command": "format", "argument": file_path}
+
+            if command_name == "autoask":
+                return {"kind": "command", "text": "", "command": "autoask", "argument": command_argument}
+
+            if normalized.startswith("/"):
+                self.display_warning("未知命令。可用命令：/quit、/format、/autoask")
+                continue
+
+            if normalized.lower() in {"q", "quit", "exit"}:
+                return {"kind": "command", "text": "", "command": "quit", "argument": ""}
+            if normalized.lower() == "format":
+                file_path = self._prompt_file_path("请输入文件路径：")
+                file_text = self._read_plain_text_file(file_path)
+                if file_text == "":
+                    continue
+                return {"kind": "command", "text": file_text, "command": "format", "argument": file_path}
+            if normalized.lower() == "autoask":
+                return {"kind": "command", "text": "", "command": "autoask", "argument": ""}
+
+            return {"kind": "text", "text": normalized, "command": "", "argument": ""}
+
+    def _read_input(self, prompt: str, completer=None) -> str:
+        if toolkit_prompt is not None:
+            try:
+                return toolkit_prompt(prompt, completer=completer, complete_while_typing=True).strip()
+            except EOFError:
+                return ""
         return input(prompt).strip()
+
+    def _split_command(self, raw_input: str) -> Tuple[str, str]:
+        if not raw_input.startswith("/"):
+            return "", ""
+        command_body = raw_input[1:].strip()
+        if not command_body:
+            return "", ""
+        parts = command_body.split(maxsplit=1)
+        command_name = parts[0].lower()
+        command_argument = parts[1].strip() if len(parts) > 1 else ""
+        return command_name, command_argument
+
+    def _prompt_file_path(self, prompt: str) -> str:
+        path_completer = PathCompleter(expanduser=True) if PathCompleter else None
+        while True:
+            file_path = self._read_input(prompt, completer=path_completer).replace('"', '').replace("'", "").strip()
+            if file_path:
+                return file_path
+            self.display_warning("文件路径不能为空。")
+
+    def _read_plain_text_file(self, file_path: str) -> str:
+        normalized_path = file_path.replace('"', '').replace("'", "").strip()
+        if not os.path.exists(normalized_path):
+            self.display_warning("文件不存在。")
+            return ""
+        try:
+            with open(normalized_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            self.display_warning(f"读取文件失败 {normalized_path}: {e}")
+            return ""
     
     def get_num_choice_input(self, prompt: str, choice_map: Dict[str, str], default_num_choice: str = None) -> str:
         """通用的数字选项输入器，choice_map 是一个从数字字符串到选项描述的映射
@@ -302,20 +400,20 @@ class UIController:
     def display_warning(self, msg: str):
         """标准化的警告输出（黄色）"""
         if msg.startswith("\n"):
-            print(f"\033[93m[W] {msg}\033[0m", end="")
-        print(f"\n\033[93m[W] {msg}\033[0m")
+            print(f"\033[93m[W] {msg}\033[0m")
+        print(f"\033[93m[W] {msg}\033[0m")
 
     def display_error(self, msg: str):
         """标准化的错误输出（红色）"""
         if msg.startswith("\n"):
-            print(f"\033[91m[E] {msg}\033[0m", end="")
-        print(f"\n\033[91m[E] {msg}\033[0m")
+            print(f"\033[91m[E] {msg}\033[0m")
+        print(f"\033[91m[E] {msg}\033[0m")
 
     def display_system(self, msg: str, is_flush: bool = False):
         """标准化的系统提示（蓝色）"""
         if msg.startswith("\n"):
-            print(f"\033[94m[S] {msg}\033[0m", end="", flush=is_flush)
-        print(f"\n\033[94m[S] {msg}\033[0m", flush=is_flush)
+            print(f"\033[94m[S] {msg}\033[0m", end="" if is_flush else "\n", flush=is_flush)
+        print(f"\033[94m[S] {msg}\033[0m", end="" if is_flush else "\n", flush=is_flush)
 
     def start_spinner(self, msg: str = "处理中", delay: float = 0.12) -> threading.Event:
         stop_event = threading.Event()

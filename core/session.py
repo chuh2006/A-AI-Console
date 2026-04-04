@@ -91,6 +91,14 @@ class ChatSession:
             self.history.pop()
         if self.full_context and self.full_context[-1]["role"] == "user":
             self.full_context.pop()
+        if self.full_context and self.full_context[-1]["role"] == "user_original":
+            self.full_context.pop()
+        if self.full_context and self.full_context[-1]["role"] == "image_uploaded":
+            self.full_context.pop()
+        if self.full_context and self.full_context[-1]["role"] == "enabled_tools":
+            self.full_context.pop()
+        if self.full_context and self.full_context[-1]["role"] == "epoch_count":
+            self.full_context.pop()
 
     def get_history(self) -> list:
         return self.history.copy()

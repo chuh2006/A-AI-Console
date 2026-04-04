@@ -5,7 +5,7 @@ from ui.ui_controller import UIController
 from core.llm_factory import LLMFactory
 from core.session import ChatSession
 import tools.prompts as prompts
-from tools.utils import read_local_file, spawnRandomContext, getRandomSpawnerDescriptionContext
+from tools.utils import spawnRandomContext, getRandomSpawnerDescriptionContext
 from tools.title_generator import generate_auto_title
 import tools.reader as reader
 from tools import costum_expections
@@ -66,10 +66,13 @@ def main():
             os.makedirs(dir_path, exist_ok=True)
 
     # 1. 初始配置阶段
-    ui.display_system("系统初始化完成，已加载配置文件。")
-    use_history = ui.get_boolean_input("是否基于历史记录进行对话？")
-    isRollBack = False
-
+    try:
+        ui.display_system("系统初始化完成，已加载配置文件。")
+        use_history = ui.get_boolean_input("是否基于历史记录进行对话？")
+        isRollBack = False
+    except KeyboardInterrupt:
+        return
+    
     if use_history:
         file_name = ui.get_user_input("请输入要读取的历史记录文件名（在chat_result目录下）：")
         conversation_history, temperature, full_history = reader.read_from_history(file_name)
@@ -96,15 +99,14 @@ def main():
             epoch += 1 if not isRollBack else 0
             isRollBack = False
             ui.display_system(f"--- 第 {epoch} 轮对话 ---")
-            
+
             # 2.1 获取用户输入
-            user_text = ui.get_user_input("请输入文本：")
-            if user_text.lower() in ["q", "quit", "exit"]:
+            chat_input = ui.get_chat_input("请输入文本")
+            if chat_input["command"] == "quit":
                 break
-            elif user_text.lower() == "format":
-                filepath = ui.get_user_input("请输入文件路径：")
-                user_text = read_local_file(filepath)
-            elif user_text.lower() == "autoask":
+
+            user_text = chat_input["text"]
+            if chat_input["command"] == "autoask":
                 try:
                     question = session.get_question(keys.get("deepseek", ""))
                     ui.display_system(f"自动提问生成成功: {question}")
@@ -112,10 +114,16 @@ def main():
                     if use_question:
                         user_text = question
                     else:
-                        user_text = ui.get_user_input("请重新输入文本：")
+                        re_input = ui.get_chat_input("请重新输入文本")
+                        if re_input["command"] == "quit":
+                            break
+                        user_text = re_input["text"]
                 except costum_expections.AutoAskerException as e:
                     ui.display_error(f"自动提问生成失败: {e}")
-                    user_text = ui.get_user_input("请重新输入文本：")
+                    re_input = ui.get_chat_input("请重新输入文本")
+                    if re_input["command"] == "quit":
+                        break
+                    user_text = re_input["text"]
             session.add_epoch_count(epoch)  # 记录轮次到 Session
             if epoch == 1 and not chat_title:
                 ui.display_system("正在根据您的输入生成对话标题...") 
@@ -248,7 +256,7 @@ def main():
             clean_temp_directory()
 
         except KeyboardInterrupt:
-            ui.display_warning("\n检测到强制中断 (Ctrl+C)。")
+            ui.display_warning("检测到强制中断 (Ctrl+C)。")
             force_quit = True
             break
 

@@ -13,3 +13,4 @@ python-docx
 tavily-python
 # 环境管理与工具
 python-dotenv
+prompt_toolkit
