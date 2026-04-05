@@ -15,3 +15,5 @@ kanalists.py
 !tools/kanalists.py
 temp/
 old_ver/
+test*
+*/test*

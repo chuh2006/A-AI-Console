@@ -1,6 +1,7 @@
 import json
 import pytesseract
 from PIL import Image
+import tools.prompts as prompts
 
 with open("config.json", "r") as f:
     config = json.load(f)

@@ -54,6 +54,10 @@ def main():
         keys = config.get("api_keys", {})
         temperature = config.get("settings", {}).get("default_temperature", 1.0)
         enable_system_prompt = config.get("settings", {}).get("enable_system_prompt", True)
+        default_model = config.get("settings", {}).get("default_model", "deepseek")
+        if default_model and default_model in ["deepseek-reasoner", "deepseek-chat"]:
+            default_model = "deepseek"
+            ui.display_warning("不再使用reasoner和chat方式开关思考")
     except Exception as e:
         ui.display_error(str(e))
         return
@@ -92,18 +96,35 @@ def main():
         epoch = 0
         chat_title = ""
 
+    
+    current_model_name = default_model if default_model else ui.get_model_choice()
+    current_model_name = ui.resolve_model_name(current_model_name)
+    ui.display_system(f"当前模型已设置为: {current_model_name}")
+
     # 2. 主事件循环
     while True:
         try:
+            save = True
             clean_temp_directory()
             epoch += 1 if not isRollBack else 0
             isRollBack = False
             ui.display_system(f"--- 第 {epoch} 轮对话 ---")
 
             # 2.1 获取用户输入
-            chat_input = ui.get_chat_input("请输入文本")
+            chat_input = ui.get_chat_input("请输入文本", current_model=current_model_name)
             if chat_input["command"] == "quit":
                 break
+
+            if chat_input["command"] == "model":
+                new_model_name = ui.resolve_model_name(chat_input["argument"])
+                if not new_model_name:
+                    ui.display_warning("模型名不能为空。")
+                    epoch -= 1  # 不增加轮次
+                    continue
+                current_model_name = new_model_name
+                ui.display_system(f"当前模型已切换为: {current_model_name}")
+                epoch -= 1  # 不增加轮次
+                continue
 
             user_text = chat_input["text"]
             if chat_input["command"] == "autoask":
@@ -136,7 +157,7 @@ def main():
                     ui.display_warning("标题生成失败，将使用默认时间戳命名。")
 
             # 2.2 获取模型与图片
-            model_name = ui.get_model_choice()
+            model_name = current_model_name
             image_paths = ui.get_image_input(model_name)
             text_file_text = ui.get_text_file_input() if ui.get_boolean_input("是否上传文件？") else None
             if text_file_text:
@@ -168,10 +189,11 @@ def main():
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
                         extra_kwargs["reasoningEffort"] = ui.get_num_choice_input("请选择思考深度(minimal为关闭思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"})
                     elif "deepseek" in model_name:
-                        if ui.get_boolean_input("是否启用DeepSeek思考", default=True):
-                            model_name = "deepseek-reasoner"
-                        else:
-                            model_name = "deepseek-chat"
+                        if model_name not in {"deepseek-chat", "deepseek-reasoner"}:
+                            if ui.get_boolean_input("是否启用DeepSeek思考", default=True):
+                                model_name = "deepseek-reasoner"
+                            else:
+                                model_name = "deepseek-chat"
                         if ui.get_boolean_input("是否启用联网搜索？"):
                             extra_kwargs["enable_search"] = True
                             extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"}) if "reasoner" in model_name else "minimal"
@@ -257,6 +279,7 @@ def main():
 
         except KeyboardInterrupt:
             ui.display_warning("检测到强制中断 (Ctrl+C)。")
+            save = ui.get_boolean_input("是否要保存当前对话？", default=True)
             force_quit = True
             break
 
@@ -264,8 +287,8 @@ def main():
     ui.display_system("会话结束，正在保存记录...")
     if force_quit:
         ui.display_warning("最新一轮对话仅会保留用户输入")
-    filepath = session.save_to_disk(title=chat_title)
-    ui.display_system(f"已保存至：{os.path.abspath(filepath)}")
+    filepath = session.save_to_disk(title=chat_title) if save else None
+    ui.display_system(f"已保存至：{os.path.abspath(filepath)}") if save else ui.display_system("未保存对话记录。")
     ui.stop_all_spinners()
     clean_temp_directory()
     

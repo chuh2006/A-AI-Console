@@ -13,11 +13,12 @@ from tools.documents_reader import DocumentParser, UnsupportedFileFormatError
 
 try:
     from prompt_toolkit import prompt as toolkit_prompt
-    from prompt_toolkit.completion import PathCompleter, WordCompleter
+    from prompt_toolkit.completion import PathCompleter, WordCompleter, NestedCompleter
 except ImportError:
     toolkit_prompt = None
     PathCompleter = None
     WordCompleter = None
+    NestedCompleter = None
 
 class UIController:
     def __init__(self):
@@ -26,6 +27,7 @@ class UIController:
             "/quit": "退出当前对话",
             "/format": "从本地文件读取文本作为输入",
             "/autoask": "自动生成提问内容",
+            "/model": "切换当前模型",
         }
         self.model_map = {
             "0": "自己回答",
@@ -48,10 +50,19 @@ class UIController:
     def get_user_input(self, prompt: str = "请输入文本：") -> str:
         return self._read_input(prompt)
 
-    def get_chat_input(self, prompt: str = "请输入文本") -> Dict[str, str]:
+    def get_chat_input(self, prompt: str = "请输入文本", current_model: str = "") -> Dict[str, str]:
         """获取支持 / 命令的聊天输入。"""
-        input_prompt = f"{prompt}> "
-        command_completer = WordCompleter(list(self.chat_commands.keys()), ignore_case=True) if WordCompleter else None
+        prompt_prefix = f"[{current_model}] " if current_model else ""
+        input_prompt = f"{prompt_prefix}{prompt}> "
+        if NestedCompleter:
+            command_completer = NestedCompleter.from_nested_dict({
+                "/quit": None,
+                "/format": None,
+                "/autoask": None,
+                "/model": {value: None for value in self.model_map.values()},
+            })
+        else:
+            command_completer = WordCompleter(list(self.chat_commands.keys()), ignore_case=True) if WordCompleter else None
 
         while True:
             raw_input = self._read_input(input_prompt, completer=command_completer)
@@ -77,8 +88,17 @@ class UIController:
             if command_name == "autoask":
                 return {"kind": "command", "text": "", "command": "autoask", "argument": command_argument}
 
+            if command_name == "model":
+                model_name = command_argument.strip()
+                if not model_name:
+                    self.display_system("当前可用模型：")
+                    for key, value in self.model_map.items():
+                        print(f"{key}: {value}")
+                    continue
+                return {"kind": "command", "text": "", "command": "model", "argument": model_name}
+
             if normalized.startswith("/"):
-                self.display_warning("未知命令。可用命令：/quit、/format、/autoask")
+                self.display_warning("未知命令。可用命令：/quit、/format、/autoask、/model")
                 continue
 
             if normalized.lower() in {"q", "quit", "exit"}:
@@ -171,6 +191,29 @@ class UIController:
 
     def get_model_choice(self) -> str:
         return self.get_num_choice_input("请选择模型：", self.model_map)
+
+    def resolve_model_name(self, model_name: str) -> str:
+        normalized = (model_name or "").strip()
+        if not normalized:
+            return ""
+
+        if normalized in self.model_map:
+            return self.model_map[normalized]
+
+        for key, value in self.model_map.items():
+            if normalized.lower() == value.lower():
+                return value
+
+        alias_map = {
+            "deepseek-chat": "deepseek-chat",
+            "deepseek-reasoner": "deepseek-reasoner",
+            "deepseek": "deepseek",
+        }
+        lowered = normalized.lower()
+        if lowered in alias_map:
+            return alias_map[lowered]
+
+        return normalized
     
     def get_en_or_disable_or_auto_input(self, prompt: str) -> str:
         """获取启用/禁用/自动选项的输入，返回 'enabled'、'disabled' 或 'auto'"""
