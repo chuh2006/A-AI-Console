@@ -28,6 +28,8 @@ class UIController:
             "/format": "从本地文件读取文本作为输入",
             "/autoask": "自动生成提问内容",
             "/model": "切换当前模型",
+            "/fork": "从历史轮次 fork 对话",
+            "/quit_without_saving": "退出且不保存当前会话",
         }
         self.model_map = {
             "0": "自己回答",
@@ -61,6 +63,7 @@ class UIController:
                 "/autoask": None,
                 "/model": {value: None for value in self.model_map.values()},
                 "/fork": None,
+                "/quit_without_saving": None,
             })
         else:
             command_completer = WordCompleter(list(self.chat_commands.keys()), ignore_case=True) if WordCompleter else None
@@ -102,6 +105,10 @@ class UIController:
                         self.display_warning("轮次必须是大于等于 1 的整数。")
                         continue
                     return {"kind": "command", "text": "", "command": "fork", "argument": str(fork_epoch)}
+                
+            if command_name == "quit_without_saving":
+                quit = self.get_boolean_input("确定要退出且不保存当前会话吗？", False)
+                return {"kind": "command", "text": "", "command": "quit_without_saving", "argument": ""} if quit else {"kind": "text", "text": "", "command": "quit", "argument": ""}
 
             if command_name == "model":
                 model_name = command_argument.strip()
@@ -113,7 +120,7 @@ class UIController:
                 return {"kind": "command", "text": "", "command": "model", "argument": model_name}
 
             if normalized.startswith("/"):
-                self.display_warning("未知命令。可用命令：/quit、/format、/autoask、/model、/fork")
+                self.display_warning("未知命令。可用命令：/quit、/format、/autoask、/model、/fork、/quit_without_saving")
                 continue
 
             if normalized.lower() in {"q", "quit", "exit"}:

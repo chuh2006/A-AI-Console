@@ -1,3 +1,4 @@
+print("\033[1;32m启动\033[0m")
 import os
 import json
 import re
@@ -114,6 +115,9 @@ def main():
             chat_input = ui.get_chat_input("请输入文本", current_model=current_model_name)
             if chat_input["command"] == "quit":
                 break
+            if chat_input["command"] == "quit_without_saving":
+                save = False
+                break
 
             if chat_input["command"] == "model":
                 new_model_name = ui.resolve_model_name(chat_input["argument"])
@@ -128,7 +132,7 @@ def main():
 
             if chat_input["command"] == "fork":
                 fork_epoch = int(chat_input["argument"])
-                if fork_epoch < 1 or fork_epoch > epoch:
+                if fork_epoch < 1 or fork_epoch >= epoch:
                     ui.display_warning(f"无效的轮次。请输入一个介于 1 和 {epoch} 之间的整数。")
                     epoch -= 1  # 不增加轮次
                     continue
