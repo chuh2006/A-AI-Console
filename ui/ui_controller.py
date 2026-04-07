@@ -60,6 +60,7 @@ class UIController:
                 "/format": None,
                 "/autoask": None,
                 "/model": {value: None for value in self.model_map.values()},
+                "/fork": None,
             })
         else:
             command_completer = WordCompleter(list(self.chat_commands.keys()), ignore_case=True) if WordCompleter else None
@@ -87,6 +88,20 @@ class UIController:
 
             if command_name == "autoask":
                 return {"kind": "command", "text": "", "command": "autoask", "argument": command_argument}
+            
+            if command_name == "fork":
+                if command_argument and command_argument.isdigit():
+                    if int(command_argument) < 1:
+                        self.display_warning("轮次必须是大于等于 1 的整数。")
+                        command_argument = ""
+                        continue
+                    return {"kind": "command", "text": "", "command": "fork", "argument": command_argument}
+                else:
+                    fork_epoch = self.get_num_input(prompt="请输入要 fork 的对话轮次")
+                    if fork_epoch < 1:
+                        self.display_warning("轮次必须是大于等于 1 的整数。")
+                        continue
+                    return {"kind": "command", "text": "", "command": "fork", "argument": str(fork_epoch)}
 
             if command_name == "model":
                 model_name = command_argument.strip()
@@ -98,7 +113,7 @@ class UIController:
                 return {"kind": "command", "text": "", "command": "model", "argument": model_name}
 
             if normalized.startswith("/"):
-                self.display_warning("未知命令。可用命令：/quit、/format、/autoask、/model")
+                self.display_warning("未知命令。可用命令：/quit、/format、/autoask、/model、/fork")
                 continue
 
             if normalized.lower() in {"q", "quit", "exit"}:
@@ -214,6 +229,19 @@ class UIController:
             return alias_map[lowered]
 
         return normalized
+    
+    def get_num_input(self, prompt: str = "请输入文本", default: int = None) -> int:
+        """获取数字输入，支持默认值"""
+        while True:
+            user_input = input(f"{prompt} {'[默认: ' + str(default) + ']' if default is not None else ''}> ").strip()
+            if user_input.isdigit():
+                try:
+                    return int(user_input)
+                except ValueError:
+                    pass
+            elif default is not None and user_input == "":
+                return default
+            self.display_warning("无效输入，请输入数字。")
     
     def get_en_or_disable_or_auto_input(self, prompt: str) -> str:
         """获取启用/禁用/自动选项的输入，返回 'enabled'、'disabled' 或 'auto'"""

@@ -126,6 +126,19 @@ def main():
                 epoch -= 1  # 不增加轮次
                 continue
 
+            if chat_input["command"] == "fork":
+                fork_epoch = int(chat_input["argument"])
+                if fork_epoch < 1 or fork_epoch > epoch:
+                    ui.display_warning(f"无效的轮次。请输入一个介于 1 和 {epoch} 之间的整数。")
+                    epoch -= 1  # 不增加轮次
+                    continue
+                file_path = session.save_to_disk(title=chat_title)
+                ui.display_system(f"已保存 fork 前的会话到 {file_path}")
+                session.fork_to(fork_epoch)
+                epoch = fork_epoch  # 将当前轮次设置为 fork 的轮次
+                ui.display_system(f"已 fork 到第 {fork_epoch} 轮。当前轮次已更新为 {epoch}。")
+                continue
+
             user_text = chat_input["text"]
             if chat_input["command"] == "autoask":
                 try:
@@ -196,7 +209,7 @@ def main():
                                 model_name = "deepseek-chat"
                         if ui.get_boolean_input("是否启用联网搜索？"):
                             extra_kwargs["enable_search"] = True
-                            extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"}) if "reasoner" in model_name else "minimal"
+                            extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"0": "time_only", "1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"}) if "reasoner" in model_name else "minimal"
                     elif "kimi" in model_name:
                         extra_kwargs["enable_thinking"] = ui.get_boolean_input("是否启用Kimi思考功能？", default=True)
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Kimi联网搜索？")

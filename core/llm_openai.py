@@ -60,10 +60,10 @@ class OpenAICompatibleClient(BaseLLMClient):
         # 添加网络搜索工具
         if kwargs.get("enable_search", False):
             if using_deepseek:
-                tools.append(web_search_tool_schema)
-                tools.append(time_tool_schema)
-                reasoning_effort_map = {"minimal": 1, "low": 2, "medium": 4, "high": 5, "max": 8, "unlimited": 10}
                 max_iterations_str = kwargs.get("searchEffort", "low")
+                tools.append(web_search_tool_schema) if max_iterations_str != "time_only" else None
+                tools.append(time_tool_schema)
+                reasoning_effort_map = {"minimal": 1, "low": 2, "medium": 4, "high": 5, "max": 8, "unlimited": 10, "time_only": 10} # time_only不给搜索工具，后面的数字无意义。
                 max_iterations = reasoning_effort_map.get(max_iterations_str, 2)
             elif using_kimi:
                 # 使用接口自带的搜索工具

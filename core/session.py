@@ -108,6 +108,20 @@ class ChatSession:
         while self._calc_token_count() >= 128000 and len(self.history) > 3:
             self.history = [self.history[0]] + self.history[3:]
 
+    def fork_to(self, epoch: int = 0):
+        if epoch <= 0:
+            return  # 不需要 fork，保留全部历史
+        new_history = []
+        new_full_context = []
+        for msg in self.full_context:
+            if msg["role"] == "epoch_count" and int(msg["content"]) >= epoch + 1:
+                break
+            new_full_context.append(msg)
+            if msg["role"] in ["user", "assistant", "system"]:
+                new_history.append(msg)
+        self.history = new_history
+        self.full_context = new_full_context
+
     def save_to_disk(self, title: str):
         if title:
             # Normalize any user-provided path-like title to a safe filename stem.
