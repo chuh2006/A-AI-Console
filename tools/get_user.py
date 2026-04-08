@@ -34,19 +34,19 @@ get_user_schema = {
 
 def get_user(question: str, input_type: str, missing_param: str, options: list = None) -> dict:
     """调用这个函数来获取用户的进一步输入，以便更好地理解用户的需求。"""
+    yellow = "\033[33m"
+    reset = "\033[0m"
+
     if options:
-        print(f"\n{question}")
+        print(f"{yellow}\n模型需要你{input_type}\n{question}\n请按选项填入{missing_param}，也可自行输入{reset}")
         for i, option in enumerate(options, 1):
-            print(f"{i}. {option}")
-        choice = input("请选择一个选项 (输入序号)> ")
-        while True:
-            if choice.isdigit() and 1 <= int(choice) <= len(options):
-                selected_option = options[int(choice) - 1]
-                return {"result": "success", "user_input": selected_option}
-            else:
-                choice = input("无效输入，请输入有效的选项序号> ")
+            print(f"{yellow}{i}. {option}{reset}")
+        choice = input(f"{yellow}请选择一个选项 (输入序号)> {reset}")
+        if choice.isdigit() and 1 <= int(choice) <= len(options):
+            selected_option = options[int(choice) - 1]
+            return {"result": "success", "user_input": selected_option}
     else:
-        user_input = input(f"\n模型需要你{input_type}\n{question}\n请填入{missing_param}(留空以拒绝)> ")
+        user_input = input(f"{yellow}\n模型需要你{input_type}\n{question}\n请填入{missing_param}(留空以拒绝)> {reset}")
         if user_input.strip() == "" or not user_input.strip():
             return {"result": "reject", "message": "用户拒绝回答问题"}
         return {"result": "success", "user_input": user_input}
