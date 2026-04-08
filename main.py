@@ -1,4 +1,4 @@
-print("\033[1;32m启动\033[0m")
+print("\033[1;32m[S] 启动中\033[0m")
 import os
 import json
 import re
@@ -138,9 +138,9 @@ def main():
                     continue
                 file_path = session.save_to_disk(title=chat_title)
                 ui.display_system(f"已保存 fork 前的会话到 {file_path}")
-                session.fork_to(fork_epoch)
+                last_user = session.fork_to(fork_epoch)
                 epoch = fork_epoch  # 将当前轮次设置为 fork 的轮次
-                ui.display_system(f"已 fork 到第 {fork_epoch} 轮。当前轮次已更新为 {epoch}。")
+                ui.display_system(f"已 fork 到第 {fork_epoch} 轮。当前轮次已更新为 {epoch}。上一条用户消息: {last_user}")
                 continue
 
             user_text = chat_input["text"]
@@ -206,9 +206,14 @@ def main():
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
                         extra_kwargs["reasoningEffort"] = ui.get_num_choice_input("请选择思考深度(minimal为关闭思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"})
                     elif "deepseek" in model_name:
-                        if model_name not in {"deepseek-chat", "deepseek-reasoner"}:
+                        if "deepseek-agent" in model_name:
+                            model_name = "deepseek-reasoner"
+                            extra_kwargs["enable_agent"] = True
+                        elif model_name not in {"deepseek-chat", "deepseek-reasoner"}:
                             if ui.get_boolean_input("是否启用DeepSeek思考", default=True):
                                 model_name = "deepseek-reasoner"
+                                if ui.get_boolean_input("是否启用增强思考", default=False):
+                                    extra_kwargs["enable_enhanced_thinking"] = True
                             else:
                                 model_name = "deepseek-chat"
                         if ui.get_boolean_input("是否启用联网搜索？"):

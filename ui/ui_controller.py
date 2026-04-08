@@ -33,7 +33,7 @@ class UIController:
         }
         self.model_map = {
             "0": "自己回答",
-            "1": "default",
+            "1": "deepseek-agent-preview",
             "2": "deepseek",
             "3": "multi-assistant-old-preview",
             "4": "帮我选择",

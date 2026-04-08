@@ -71,7 +71,11 @@ class ChatSession:
                     self.full_context.append({"role": "tool_ocr_extraction", "content": ocr_log})
             if meta.get("search_keywords"):
                 self.full_context.append({"role": "search_keywords", "content": str(meta.get("search_keywords"))})
-            
+            if meta.get("assistant_questions"):
+                self.full_context.append({"role": "assistant_questions", "content": str(meta.get("assistant_questions"))})
+            if meta.get("user_inputs"):
+                self.full_context.append({"role": "user_inputs", "content": str(meta.get("user_inputs"))})
+
         if thinking:
             self.full_context.append({"role": "assistant_thinking", "content": thinking})
             
@@ -108,9 +112,10 @@ class ChatSession:
         while self._calc_token_count() >= 128000 and len(self.history) > 3:
             self.history = [self.history[0]] + self.history[3:]
 
-    def fork_to(self, epoch: int = 0):
+    def fork_to(self, epoch: int = 0) -> str:
         if epoch <= 0:
             return  # 不需要 fork，保留全部历史
+        ret = ""
         new_history = []
         new_full_context = []
         for msg in self.full_context:
@@ -119,8 +124,10 @@ class ChatSession:
             new_full_context.append(msg)
             if msg["role"] in ["user", "assistant", "system"]:
                 new_history.append(msg)
+                ret = msg["content"] if msg["role"] == "user" else ret
         self.history = new_history
         self.full_context = new_full_context
+        return ret
 
     def save_to_disk(self, title: str):
         if title:
