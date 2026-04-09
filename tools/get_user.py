@@ -2,7 +2,7 @@ get_user_schema = {
     "type": "function",
     "function": {
         "name": "get_user",
-        "description": "有时用户提供的消息可能不完整或者不清晰，你可以调用这个工具来获取用户的进一步输入，以便更好地理解用户的需求。",
+        "description": "[仅可在思考中调用] 有时用户提供的消息可能不完整或者不清晰，你可以调用这个工具来获取用户的进一步输入，以便更好地理解用户的需求。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -45,8 +45,13 @@ def get_user(question: str, input_type: str, missing_param: str, options: list =
         if choice.isdigit() and 1 <= int(choice) <= len(options):
             selected_option = options[int(choice) - 1]
             return {"result": "success", "user_input": selected_option}
+        else:
+            user_input = choice.strip()
+            if user_input == "" or not user_input:
+                return {"result": "reject", "user_input": "用户拒绝回答问题"}
+            return {"result": "success", "user_input": user_input}
     else:
         user_input = input(f"{yellow}\n模型需要你{input_type}\n{question}\n请填入{missing_param}(留空以拒绝)> {reset}")
         if user_input.strip() == "" or not user_input.strip():
-            return {"result": "reject", "message": "用户拒绝回答问题"}
+            return {"result": "reject", "user_input": "用户拒绝回答问题"}
         return {"result": "success", "user_input": user_input}

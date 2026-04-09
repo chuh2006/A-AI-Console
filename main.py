@@ -1,8 +1,9 @@
-print("\033[1;32m[S] 启动中\033[0m")
 import os
 import json
 import re
 from ui.ui_controller import UIController
+print("\033[1;32m[S] 启动中")
+print("\r[S] 导入核心库 [0/4]", end="")
 from core.llm_factory import LLMFactory
 from core.session import ChatSession
 import tools.prompts as prompts
@@ -10,6 +11,7 @@ from tools.utils import spawnRandomContext, getRandomSpawnerDescriptionContext
 from tools.title_generator import generate_auto_title
 import tools.reader as reader
 from tools import costum_expections
+print("\033[0m", end="")
 
 def load_config() -> dict:
     """读取 main.py 同级目录下的 config.json"""
@@ -194,6 +196,7 @@ def main():
             while True:
                 try:
                     extra_kwargs = {}
+                    new_model_name = model_name
                     if "gemini" in model_name:
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
                         extra_kwargs["think_level"] = ui.get_num_choice_input("请选择思考层级(minimal不代表一定不思考；high不代表一定思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"}) 
@@ -207,16 +210,18 @@ def main():
                         extra_kwargs["reasoningEffort"] = ui.get_num_choice_input("请选择思考深度(minimal为关闭思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"})
                     elif "deepseek" in model_name:
                         if "deepseek-agent" in model_name:
-                            model_name = "deepseek-reasoner"
+                            new_model_name = "deepseek-reasoner"
                             extra_kwargs["enable_agent"] = True
+                            if ui.get_boolean_input("是否启用交互式思考？", default=False):
+                                extra_kwargs["enable_enhanced_thinking"] = True
                         elif model_name not in {"deepseek-chat", "deepseek-reasoner"}:
                             if ui.get_boolean_input("是否启用DeepSeek思考", default=True):
-                                model_name = "deepseek-reasoner"
-                                if ui.get_boolean_input("是否启用增强思考", default=False):
+                                new_model_name = "deepseek-reasoner"
+                                if ui.get_boolean_input("是否启用交互式思考", default=False):
                                     extra_kwargs["enable_enhanced_thinking"] = True
                             else:
-                                model_name = "deepseek-chat"
-                        if ui.get_boolean_input("是否启用联网搜索？"):
+                                new_model_name = "deepseek-chat"
+                        if ui.get_boolean_input("是否启用联网搜索？", default=True if "agent" in model_name else False):
                             extra_kwargs["enable_search"] = True
                             extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"0": "time_only", "1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"}) if "reasoner" in model_name else "minimal"
                     elif "kimi" in model_name:
@@ -230,7 +235,7 @@ def main():
                     if extra_kwargs.get("enable_search"):
                         enabled_tools.append("web_search")
                     session.add_enabled_tools(enabled_tools)  # 记录启用的工具到 Session
-                    llm_client = LLMFactory.create_client(model_name, keys)
+                    llm_client = LLMFactory.create_client(new_model_name, keys)
                     # 获取流生成器
                     stream = llm_client.chat_stream(
                         messages=session.get_history(),

@@ -10,14 +10,63 @@ from tools.web_search_ds import web_search_tool_schema, search_web
 from tools.prompts import Prompts
 from tools.kimi_tools import kimi_web_search_tool_schema, search_impl
 from tools.time_get import time_tool_schema, get_time
-from tools.make_new_function_tool import create_new_tool_schema, create_new_tool
+from tools.make_new_function_tool import create_new_tool_schema, create_new_tool  # 暂时弃用
 from tools.run_new_function import run_func
 from tools.get_user import get_user_schema, get_user
+from tools.think_abstract import think_abstract_schema, think_abstract
 
 class OpenAICompatibleClient(BaseLLMClient):
+    def sanitize_tool_call_messages(self, raw_messages: List[Dict]) -> List[Dict]:
+        """清理不符合 tool-calling 协议的历史消息，避免 400 invalid_request_error。"""
+        cleaned: List[Dict] = []
+        idx = 0
+        while idx < len(raw_messages):
+            msg = raw_messages[idx]
+            role = msg.get("role")
+            if role == "assistant" and msg.get("tool_calls"):
+                expected_ids = {
+                    tc.get("id")
+                    for tc in msg.get("tool_calls", [])
+                    if isinstance(tc, dict) and tc.get("id")
+                }
+                # assistant 标记了 tool_calls，但没有有效 id 时，降级为普通 assistant 消息
+                if not expected_ids:
+                    assistant_msg = msg.copy()
+                    assistant_msg.pop("tool_calls", None)
+                    cleaned.append(assistant_msg)
+                    idx += 1
+                    continue
+                found_ids = set()
+                collected_tool_msgs: List[Dict] = []
+                probe = idx + 1
+                # tool 消息必须紧跟在 assistant(tool_calls) 后面
+                while probe < len(raw_messages) and raw_messages[probe].get("role") == "tool":
+                    tool_msg = raw_messages[probe]
+                    tool_call_id = tool_msg.get("tool_call_id")
+                    if tool_call_id in expected_ids and tool_call_id not in found_ids:
+                        collected_tool_msgs.append(tool_msg)
+                        found_ids.add(tool_call_id)
+                    probe += 1
+                if found_ids == expected_ids:
+                    cleaned.append(msg)
+                    cleaned.extend(collected_tool_msgs)
+                else:
+                    # 不完整的 tool-calls 轮次会导致后续请求报错，这里降级为普通 assistant 内容
+                    assistant_msg = msg.copy()
+                    assistant_msg.pop("tool_calls", None)
+                    cleaned.append(assistant_msg)
+                idx = probe
+                continue
+            if role == "tool":
+                # 孤立 tool 消息直接丢弃
+                idx += 1
+                continue
+            cleaned.append(msg)
+            idx += 1
+        return cleaned
+
     def chat_stream(self, messages: List[Dict[str, str | list]], temperature: float, image_paths: List[str] = None, **kwargs) -> Generator[Dict[str, str], None, None]:
         client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-
         using_kimi = "kimi" in self.model_name
         using_deepseek_reasoner = "reasoner" in self.model_name
         using_deepseek = "deepseek" in self.model_name
@@ -34,7 +83,11 @@ class OpenAICompatibleClient(BaseLLMClient):
         get_user_inputs = []  # 用于存储 get_user 工具调用中用户的输入，以便后续分析和调试
 
         # test:
-        tools.append(create_new_tool_schema) if using_deepseek_agent else None
+        if using_deepseek_agent:
+        # tools.append(create_new_tool_schema) if using_deepseek_agent else None
+            tools.append(think_abstract_schema)
+            # 在最前面加系统提示词
+            req_messages.insert(0, {"role": "system", "content": Prompts.deepseek_agent_system})
 
         # 统一处理：让模型自主决定是否调用 OCR
         if using_deepseek:
@@ -83,14 +136,21 @@ class OpenAICompatibleClient(BaseLLMClient):
             else:
                 pass
 
+        if using_deepseek_agent:
+            max_iterations += 10  # DeepSeek Agent 允许更多轮次的工具调用
+
         loop_count = 0
-        begin_time = time.time() if using_deepseek_reasoner or using_kimi else None
+        get_user_count = 0
+        status = -1 # -1: 初始状态，0: 思考，1: 正式回答
+        begin_time = time.time() if using_deepseek_reasoner or using_kimi or using_deepseek_agent else None
 
         # ====================================================
         # 进入多轮 Tool Calling 循环
         # ====================================================
         while True:
             loop_count += 1
+
+            req_messages = self.sanitize_tool_call_messages(req_messages)
 
             if kimi_thinking_enabled:
                 for msg in req_messages:
@@ -134,12 +194,17 @@ class OpenAICompatibleClient(BaseLLMClient):
 
                 # 捕获思维链内容（注意：可能与 tool_calls 同时出现，不能用 elif）
                 if getattr(delta, 'reasoning_content', None):
+                    status = 0
                     reasoning_buffer += delta.reasoning_content
                     isThinkingTime = True
-                    yield {"type": "thinking", "content": delta.reasoning_content}
+                    if not using_deepseek_agent:
+                        yield {"type": "thinking", "content": delta.reasoning_content}
+                    else:
+                        yield {"type": "thinking", "content": delta.reasoning_content, "display": False}
 
                 # 捕获常规回复内容
                 if getattr(delta, 'content', None):
+                    status = 1
                     content_buffer += delta.content
                     if isThinkingTime:
                         yield {"type": "meta", "thinking_time": time.time() - begin_time}
@@ -177,9 +242,9 @@ class OpenAICompatibleClient(BaseLLMClient):
                         except json.JSONDecodeError:
                             target_path = ""
                         
-                        yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 正在提取图片文本: {target_path}...\033[0m\n"}
+                        yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 正在提取图片文本: {target_path}...\033[0m\n"} if not using_deepseek_agent else None
                         ocr_result = perform_ocr(target_path)
-                        yield {"type": "system", "content": f"\033[93m[本地OCR返回结果]: {ocr_result[:50]}...\033[0m\n"}
+                        yield {"type": "system", "content": f"\033[93m[本地OCR返回结果]: {ocr_result[:50]}...\033[0m\n"} if not using_deepseek_agent else None
                         
                         yield {"type": "meta_ocr", "image_path": target_path, "ocr_text": ocr_result}
 
@@ -197,10 +262,10 @@ class OpenAICompatibleClient(BaseLLMClient):
                         except json.JSONDecodeError:
                             queries = []
                         if queries:
-                            yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 正在执行网络搜索，关键词: {queries}...\033[0m\n"}
+                            yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 正在执行网络搜索，关键词: {queries}...\033[0m\n"} if not using_deepseek_agent else None
                             search_results = search_web(queries)
                             yield {"type": "meta", "search_keywords": queries, "uris": search_results.get("sources", [])}
-                            yield {"type": "system", "content": f"\033[93m[网络搜索返回结果]: {search_results['results'][:50]}...\033[0m\n"}
+                            yield {"type": "system", "content": f"\033[93m[网络搜索返回结果]: {search_results['results'][:50]}...\033[0m\n"} if not using_deepseek_agent else None
                         req_messages.append({
                             "role": "tool", 
                             "tool_call_id": tc["id"], 
@@ -225,23 +290,56 @@ class OpenAICompatibleClient(BaseLLMClient):
                             "content": tool_result
                         })
                     elif tc["function"]["name"] == "get_user":
-                        yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 获取用户进一步输入\033[0m\n"}
-                        question_str = tc["function"]["arguments"]
-                        question_dict = json.loads(question_str)
-                        question = question_dict.get("question", "请提供更多信息。")
-                        input_type = question_dict.get("type", "提供信息")
-                        missing_param = question_dict.get("missing_param", "相关信息")
-                        options = question_dict.get("options", None)
-                        user_response = get_user(question, input_type, missing_param, options)
-                        get_user_questions.append(question_dict)  # 记录向用户提出的问题，以便后续分析
-                        if user_response.get("result") == "success":
-                            get_user_inputs.append(user_response["user_input"])  # 保存用户输入以供后续分析
+                        yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 获取用户进一步输入\033[0m\n"} if not using_deepseek_agent else None
+                        loop_count -= 1  # 获取用户输入不计入迭代次数限制
+                        if get_user_count >= 2:  # 限制最多向用户提出两次问题，防止过度依赖用户输入导致的死循环
+                            req_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": "Rejected: 已达到最大向用户提问次数限制，系统强制拦截所有 get_user 工具调用。请停止尝试获取用户输入"
+                            })
+                        elif status == 1 and content_buffer.strip() != "":  # 如果已经有正式回答了，就不要再问用户了，防止模型在得到答案后又反过来质疑用户输入导致的死循环
+                            req_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": "Rejected: 正式回答过程中不允许调用 get_user 工具。请停止尝试获取用户输入"
+                            })
                         else:
-                            get_user_inputs.append(f"用户拒绝回答问题: {question}")  # 记录用户拒绝的情况
+                            question_str = tc["function"]["arguments"]
+                            question_dict = json.loads(question_str)
+                            question = question_dict.get("question", "请提供更多信息。")
+                            input_type = question_dict.get("type", "提供信息")
+                            missing_param = question_dict.get("missing_param", "相关信息")
+                            options = question_dict.get("options", None)
+                            user_response = get_user(question, input_type, missing_param, options)
+                            get_user_questions.append(question_dict)  # 记录向用户提出的问题，以便后续分析
+                            if user_response.get("result") == "success":
+                                get_user_inputs.append(user_response["user_input"])  # 保存用户输入以供后续分析
+                            else:
+                                get_user_inputs.append(f"用户拒绝回答问题: {question}")  # 记录用户拒绝的情况
+                            req_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": user_response.get("user_input", "")
+                            })
+                            get_user_count += 1  # 独立计数器
+
+                    if tc["function"]["name"] == "think_abstract":
+                        if status == 1 and content_buffer.strip() != "":
+                            req_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": "Rejected: 正式回答过程中不允许调用 think_abstract 工具。请停止尝试调用该工具"
+                            })
+                        ai_return_str = tc["function"]["arguments"]
+                        ai_return_dict = think_abstract(ai_return_str)
+                        yield {"type": "abstract", "content_dict": ai_return_dict}
+                        loop_count -= 1  # think_abstract 工具不计入迭代次数限制
+                        time.sleep(1)
                         req_messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
-                            "content": user_response.get("user_input", "")
+                            "content": "Success: 成功调用工具并向用户展示了思考摘要，你可继续正常思考"
                         })
 
 
@@ -306,9 +404,8 @@ class OpenAICompatibleClient(BaseLLMClient):
                         })
 
 
-
                     elif tc["function"]["name"] == "max_tool_calls_exceeded":
-                        tool_result = "Error: 已达到最大工具调用次数限制，系统强制拦截所有工具调用。请停止尝试调用任何工具，立刻基于已有信息给出你的最终自然语言回答。"
+                        tool_result = "Error: 已达到最大工具调用次数限制，系统强制拦截所有工具调用。请停止尝试调用任何工具"
                         req_messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],

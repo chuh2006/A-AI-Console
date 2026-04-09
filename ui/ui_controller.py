@@ -43,10 +43,11 @@ class UIController:
             "8": "gemini-3-flash-preview",
             "9": "gemini-3.1-pro-preview",
             "10": "qwen3.5-plus",
-            "11": "doubao-seed-2-0-pro-260215",
-            "12": "doubao-seed-2-0-lite-260215",
-            "13": "doubao-seed-2-0-mini-260215",
-            "14": "kimi-k2.5"
+            "11": "qwen3.6-plus",
+            "12": "doubao-seed-2-0-pro-260215",
+            "13": "doubao-seed-2-0-lite-260215",
+            "14": "doubao-seed-2-0-mini-260215",
+            "15": "kimi-k2.5"
             }
 
     def get_user_input(self, prompt: str = "请输入文本：") -> str:
@@ -411,6 +412,52 @@ class UIController:
             if user_input in {"n", "no"}:
                 return False
             self.display_warning("请输入 y/yes 或 n/no。")
+
+    def _print_typewriter(self, text: str, color_code: str = "", base_delay: float = 0.008):
+        """将完整字符串按 token 风格分块输出，模拟流式打印效果。"""
+        if text is None:
+            text = ""
+
+        text_length = len(text)
+        if text_length > 400:
+            chunk_delay = 0.018
+        elif text_length > 200:
+            chunk_delay = 0.022
+        else:
+            chunk_delay = max(base_delay * 2.5, 0.014)
+
+        if color_code:
+            print(color_code, end="", flush=True)
+
+        idx = 0
+        while idx < text_length:
+            remain = text_length - idx
+
+            # 模拟 token 批量输出：一般每次输出 2~8 个字符，剩余较少时一次输出完。
+            if remain <= 4:
+                step = remain
+            elif remain <= 12:
+                step = 3
+            elif remain <= 24:
+                step = 4
+            elif remain <= 80:
+                step = 5
+            else:
+                step = 6
+
+            chunk = text[idx:idx + step]
+            print(chunk, end="", flush=True)
+            idx += step
+
+            # 如果这个分块尾部是标点，增加停顿，贴近真实阅读节奏。
+            if chunk and chunk[-1] in "，。！？,.!?；;：:\n":
+                time.sleep(chunk_delay * 1.8)
+            else:
+                time.sleep(chunk_delay)
+
+        if color_code:
+            print("\033[0m", end="", flush=True)
+        print()
     
     def render_stream(self, stream: Generator[Dict[str, Any], None, None]) -> Tuple[str, str, Dict]:
         """
@@ -427,8 +474,11 @@ class UIController:
         meta_info = {"ocr_results": []} # 专门开辟一个列表放 OCR 记录
 
         for chunk in stream:
+            if not isinstance(chunk, dict):
+                continue
             chunk_type = chunk.get("type")
             content = chunk.get("content", "")
+            content_dict = chunk.get("content_dict", {})
 
             if chunk_type == "meta_ocr":
                 # 将 OCR 结果暂存在 meta 中
@@ -439,7 +489,7 @@ class UIController:
 
             elif chunk_type == "thinking":
                 is_thinking = True
-                print(content, end="", flush=True)
+                print(content, end="", flush=True) if chunk.get("display", True) else None
                 thought_content += content
 
             elif chunk_type == "content":
@@ -459,6 +509,12 @@ class UIController:
             elif chunk_type == "system":
                 # 打印系统级别的提示（比如上传图片的进度）
                 print(f"\033[94m[S] {content}\033[0m", end="", flush=True)
+            
+            elif chunk_type == "abstract":
+                title = content_dict.get("title", "")
+                abstract = content_dict.get("abstract", "")
+                self._print_typewriter(title, color_code="\033[97m")
+                self._print_typewriter(abstract, color_code="\033[90m")
 
             elif chunk_type == "input":
                 final_answer = self.get_user_input(prompt="请自己回答：")

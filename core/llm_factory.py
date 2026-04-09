@@ -1,10 +1,15 @@
 from .llm_openai import OpenAICompatibleClient
+print("\r[S] 导入核心库 [1/4]", end="")
 from .llm_gemini import GeminiClient
+print("\r[S] 导入核心库 [2/4]", end="")
 from .llm_base import BaseLLMClient
 from .llm_doubao import VolcengineClient
+print("\r[S] 导入核心库 [3/4]", end="")
 from .llm_qwen import QwenClient
+print("\r[S] 导入核心库 [4/4]", end="")
 from .llm_default import DefaultClient
 from .multi_assistant import MultiAssistant
+print("\r[S] 核心库导入完成！          ")
 
 class LLMFactory:
     @staticmethod
