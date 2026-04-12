@@ -38,9 +38,8 @@ def load_config() -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def main():
+def main(ui: UIController = None):
     force_quit = False
-    ui = UIController()
     def clean_temp_directory():
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
         if os.path.exists(temp_dir):
@@ -73,12 +72,9 @@ def main():
             os.makedirs(dir_path, exist_ok=True)
 
     # 1. 初始配置阶段
-    try:
-        ui.display_system("系统初始化完成，已加载配置文件。")
-        use_history = ui.get_boolean_input("是否基于历史记录进行对话？")
-        isRollBack = False
-    except KeyboardInterrupt:
-        return
+    ui.display_system("系统初始化完成，已加载配置文件。")
+    use_history = ui.get_boolean_input("是否基于历史记录进行对话？")
+    isRollBack = False
     
     if use_history:
         file_name = ui.get_user_input("请输入要读取的历史记录文件名（在chat_result目录下）：")
@@ -223,7 +219,7 @@ def main():
                                 new_model_name = "deepseek-chat"
                         if ui.get_boolean_input("是否启用联网搜索？", default=True if "agent" in model_name else False):
                             extra_kwargs["enable_search"] = True
-                            extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"0": "time_only", "1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"}) if "reasoner" in model_name else "minimal"
+                            extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"0": "time_only", "1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"}) if "reasoner" in new_model_name else "minimal"
                     elif "kimi" in model_name:
                         extra_kwargs["enable_thinking"] = ui.get_boolean_input("是否启用Kimi思考功能？", default=True)
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Kimi联网搜索？")
@@ -320,4 +316,16 @@ def main():
     clean_temp_directory()
     
 if __name__ == "__main__":
-    main()
+    ui = UIController()
+    while True:
+        ui.display_system("欢迎")
+        try:
+            main(ui)
+        except KeyboardInterrupt:
+            ui.display_warning("检测到强制中断 (Ctrl+C)。")
+        except Exception as e:
+            ui.display_error(f"程序发生未处理的错误: {e}")
+        q = ui.get_boolean_input("是否重新开始一个新的对话？")
+        if not q:
+            ui.display_system("退出")
+            break

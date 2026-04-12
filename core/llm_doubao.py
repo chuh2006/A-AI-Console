@@ -30,6 +30,7 @@ class VolcengineClient(BaseLLMClient):
             "type": "web_search",
             "max_keyword": keyWordsCountMapping.get(reasoning_effort, 1)
         }] if enable_search else None
+        tool_call_history = []  # 用于记录工具调用的历史，包含工具名称和调用状态（成功/被拒绝）
 
         req_messages = self._convert_history(messages)
         file_ids = []
@@ -120,7 +121,13 @@ class VolcengineClient(BaseLLMClient):
 
         if reasoning_effort == "minimal":
             reasoning_effort = None  # 后端不区分 minimal 和 None，前端展示时也不特别标注 minimal，保持简洁
+        
+        if enable_search and search_queries:
+            tool_call_history.append({
+                "name": "web_search",
+                "status": "success" if search_sources else "no_results"
+            })
             
-        yield {"type": "meta", "think_level": reasoning_effort if reasoning_effort is not None else None, "uris": search_sources, "search_keywords": search_queries}
+        yield {"type": "meta", "think_level": reasoning_effort if reasoning_effort is not None else None, "uris": search_sources, "search_keywords": search_queries, "tool_call_history": tool_call_history}
 
         client.close()

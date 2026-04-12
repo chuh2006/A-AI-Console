@@ -85,6 +85,8 @@ class GeminiClient(BaseLLMClient):
 
         # 5. 流结束，提取 metadata (搜索链接和思考耗时)
         uris = []
+        status = False
+        tool_history = []
         if last_chunk and last_chunk.candidates and last_chunk.candidates[0].grounding_metadata:
             metadata = last_chunk.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
@@ -93,10 +95,17 @@ class GeminiClient(BaseLLMClient):
                         title = chunk_data.web.title
                         uri = chunk_data.web.uri
                         uris.append(f"- [{title}]({uri})")
+                        status = True  # 只要有一个搜索结果就认为搜索成功了
+        if status:
+            tool_history.append({
+                "name": "google_search",
+                "status": "success",
+            })
 
         yield {
             "type": "meta",
             "thinking_time": think_time if has_thought else -1.0,
             "uris": uris,
-            "think_level": think_level
+            "think_level": think_level,
+            "tool_call_history": tool_history
         }

@@ -75,6 +75,13 @@ class ChatSession:
                 self.full_context.append({"role": "assistant_questions", "content": str(meta.get("assistant_questions"))})
             if meta.get("user_inputs"):
                 self.full_context.append({"role": "user_inputs", "content": str(meta.get("user_inputs"))})
+            if meta.get("tool_call_history"):
+                str_tool_history = "\n".join([f"##### name: {item['name']},\nstatus: {item['status']}" for item in meta["tool_call_history"]])
+                self.full_context.append({"role": "tool_call_history", "content": str_tool_history})
+
+            # 通用 meta 信息记录
+            if meta.get("meta_title") and meta.get("meta_context"):
+                self.full_context.append({"role": meta.get("meta_title"), "content": meta.get("meta_context")})
 
         if thinking:
             self.full_context.append({"role": "assistant_thinking", "content": thinking})

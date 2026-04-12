@@ -81,6 +81,7 @@ class OpenAICompatibleClient(BaseLLMClient):
         new_tool_function = None
         get_user_questions = []  # 用于存储 get_user 工具调用中向用户提出的问题，以便后续分析和调试
         get_user_inputs = []  # 用于存储 get_user 工具调用中用户的输入，以便后续分析和调试
+        tool_call_history: List[Dict] = []  # 用于记录所有工具调用的历史，包括工具名称、参数和返回结果，以便后续分析和调试
 
         # test:
         if using_deepseek_agent:
@@ -236,6 +237,7 @@ class OpenAICompatibleClient(BaseLLMClient):
                     if loop_count > max_iterations and tc["function"]["name"] != "get_time":
                         tc["function"]["name"] = "max_tool_calls_exceeded"
                     if tc["function"]["name"] == "perform_ocr":
+                        tool_status = "success"
                         try:
                             args = json.loads(tc["function"]["arguments"])
                             target_path = args.get("image_path", "")
@@ -254,6 +256,10 @@ class OpenAICompatibleClient(BaseLLMClient):
                             "tool_call_id": tc["id"], 
                             "content": ocr_result
                         })
+                        tool_call_history.append({
+                            "name": tc["function"]["name"],
+                            "status": "success"
+                        })
                     elif tc["function"]["name"] == "search_web":
                         search_result = ""
                         try:
@@ -271,6 +277,10 @@ class OpenAICompatibleClient(BaseLLMClient):
                             "tool_call_id": tc["id"], 
                             "content": search_results['results']
                         })
+                        tool_call_history.append({
+                            "name": tc["function"]["name"],
+                            "status": "success"
+                        })
                     elif tc["function"]["name"] == "$web_search":  # Kimi 内置搜索工具
                         arguments = json.loads(tc["function"]["arguments"])
                         tool_result = search_impl(arguments)
@@ -281,6 +291,10 @@ class OpenAICompatibleClient(BaseLLMClient):
                             "name": tc["function"]["name"],
                             "content": json.dumps(tool_result["arguments"])
                         })
+                        tool_call_history.append({
+                            "name": tc["function"]["name"],
+                            "status": "success"
+                        })
                     elif tc["function"]["name"] == "get_time":
                         tool_result = get_time()
                         loop_count -= 1  # 时间工具不计入迭代次数限制
@@ -289,21 +303,29 @@ class OpenAICompatibleClient(BaseLLMClient):
                             "tool_call_id": tc["id"],
                             "content": tool_result
                         })
+                        tool_call_history.append({
+                            "name": tc["function"]["name"],
+                            "status": "success",
+                            "result": tool_result
+                        })
                     elif tc["function"]["name"] == "get_user":
                         yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 获取用户进一步输入\033[0m\n"} if not using_deepseek_agent else None
                         loop_count -= 1  # 获取用户输入不计入迭代次数限制
+                        tool_status = "success"
                         if get_user_count >= 2:  # 限制最多向用户提出两次问题，防止过度依赖用户输入导致的死循环
                             req_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "content": "Rejected: 已达到最大向用户提问次数限制，系统强制拦截所有 get_user 工具调用。请停止尝试获取用户输入"
                             })
+                            tool_status = "rejected_max_count"
                         elif status == 1 and content_buffer.strip() != "":  # 如果已经有正式回答了，就不要再问用户了，防止模型在得到答案后又反过来质疑用户输入导致的死循环
                             req_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "content": "Rejected: 正式回答过程中不允许调用 get_user 工具。请停止尝试获取用户输入"
                             })
+                            tool_status = "rejected_no_thinking"
                         else:
                             question_str = tc["function"]["arguments"]
                             question_dict = json.loads(question_str)
@@ -317,11 +339,17 @@ class OpenAICompatibleClient(BaseLLMClient):
                                 get_user_inputs.append(user_response["user_input"])  # 保存用户输入以供后续分析
                             else:
                                 get_user_inputs.append(f"用户拒绝回答问题: {question}")  # 记录用户拒绝的情况
+                                tool_status = "rejected_user_refusal"
                             req_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "content": user_response.get("user_input", "")
                             })
+                            tool_call_history.append({
+                                "name": tc["function"]["name"],
+                                "status": tool_status,
+                            })
+                            
                             get_user_count += 1  # 独立计数器
 
                     if tc["function"]["name"] == "think_abstract":
@@ -425,5 +453,7 @@ class OpenAICompatibleClient(BaseLLMClient):
                 break
         if get_user_inputs or get_user_questions:
             yield {"type": "meta", "assistant_questions": get_user_questions, "user_inputs": get_user_inputs}
+        if tool_call_history:
+            yield {"type": "meta", "tool_call_history": tool_call_history}
 
         client.close()

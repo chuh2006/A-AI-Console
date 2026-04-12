@@ -17,7 +17,7 @@ class QwenClient(BaseLLMClient):
                 return getattr(obj, key)
             except (AttributeError, KeyError, TypeError):
                 return default
-
+        tool_call_history = []  # 用于记录工具调用的历史，包含工具名称和调用状态（成功/被拒绝）
         req_messages = [msg.copy() for msg in messages]
         if image_paths:
             last_content = req_messages[-1]["content"]
@@ -85,4 +85,9 @@ class QwenClient(BaseLLMClient):
             for web in search_info["search_results"]:
                 search_results.append(f"[{web['title']}]({web['url']})")
 
-        yield {"type": "meta", "uris": search_results}
+        tool_call_history.append({
+            "name": "web_search",
+            "status": "success" if search_results else "no_results"
+        }) if enable_search else None
+
+        yield {"type": "meta", "uris": search_results, "tool_call_history": tool_call_history}
