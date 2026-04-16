@@ -15,7 +15,7 @@ from tools.run_new_function import run_func
 from tools.get_user import get_user_schema, get_user
 from tools.think_abstract import think_abstract_schema, think_abstract
 
-class OpenAICompatibleClient(BaseLLMClient):
+class OpenAIClient(BaseLLMClient):
     def sanitize_tool_call_messages(self, raw_messages: List[Dict]) -> List[Dict]:
         """清理不符合 tool-calling 协议的历史消息，避免 400 invalid_request_error。"""
         cleaned: List[Dict] = []

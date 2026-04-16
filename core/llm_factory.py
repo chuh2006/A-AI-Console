@@ -1,12 +1,14 @@
-from .llm_openai import OpenAICompatibleClient
-print("\r[S] 导入核心库 [1/4]", end="")
+from .llm_openai import OpenAIClient
+print("\r[S] 导入核心库 [1/5]", end="")
 from .llm_gemini import GeminiClient
-print("\r[S] 导入核心库 [2/4]", end="")
+print("\r[S] 导入核心库 [2/5]", end="")
 from .llm_base import BaseLLMClient
 from .llm_doubao import VolcengineClient
-print("\r[S] 导入核心库 [3/4]", end="")
+print("\r[S] 导入核心库 [3/5]", end="")
 from .llm_qwen import QwenClient
-print("\r[S] 导入核心库 [4/4]", end="")
+print("\r[S] 导入核心库 [4/5]", end="")
+from .llm_anthropic import AnthropicLLMClient
+print("\r[S] 导入核心库 [5/5]", end="")
 from .llm_default import DefaultClient
 from .multi_assistant import MultiAssistant
 print("\r[S] 核心库导入完成！          ")
@@ -21,9 +23,11 @@ class LLMFactory:
         elif "doubao" in model_name:
             return VolcengineClient(api_key=keys["doubao"], model_name=model_name, base_url="https://ark.cn-beijing.volces.com/api/v3")
         elif "deepseek" in model_name:
-            return OpenAICompatibleClient(api_key=keys["deepseek"], model_name=model_name, base_url="https://api.deepseek.com")
+            return OpenAIClient(api_key=keys["deepseek"], model_name=model_name, base_url="https://api.deepseek.com")
         elif "kimi" in model_name:
-            return OpenAICompatibleClient(api_key=keys["kimi"], model_name=model_name, base_url="https://api.moonshot.cn/v1")
+            return OpenAIClient(api_key=keys["kimi"], model_name=model_name, base_url="https://api.moonshot.cn/v1")
+        elif "minimax" in model_name.lower():
+            return AnthropicLLMClient(api_key=keys["minimax"], model_name=model_name, base_url="https://api.minimaxi.com/anthropic")
         elif "multi-assistant" in model_name:
             multi_keys = {
                 provider: keys.get(provider, "")

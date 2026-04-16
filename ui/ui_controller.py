@@ -47,10 +47,14 @@ class UIController:
             "12": "doubao-seed-2-0-pro-260215",
             "13": "doubao-seed-2-0-lite-260215",
             "14": "doubao-seed-2-0-mini-260215",
-            "15": "kimi-k2.5"
+            "15": "kimi-k2.5",
+            "16": "MiniMax-M2.7",
+            "17": "MiniMax-M2.5"
             }
 
-    def get_user_input(self, prompt: str = "请输入文本：") -> str:
+    def get_user_input(self, prompt: str = "请输入文本：", empty_choice: str = None) -> str:
+        if empty_choice is not None:
+            return empty_choice if prompt.strip() == "" else self._read_input(prompt)
         return self._read_input(prompt)
 
     def get_chat_input(self, prompt: str = "请输入文本", current_model: str = "") -> Dict[str, str]:
@@ -64,6 +68,7 @@ class UIController:
                 "/autoask": None,
                 "/model": {value: None for value in self.model_map.values()},
                 "/fork": None,
+                "/system": None,
                 "/quit_without_saving": None,
             })
         else:
@@ -92,6 +97,13 @@ class UIController:
 
             if command_name == "autoask":
                 return {"kind": "command", "text": "", "command": "autoask", "argument": command_argument}
+            
+            if command_name == "system":
+                new_system_prompt = command_argument.strip()
+                if not new_system_prompt:
+                    self.display_warning("系统提示不能为空，请重新输入。")
+                    continue
+                return {"kind": "command", "text": new_system_prompt, "command": "system", "argument": ""}
             
             if command_name == "fork":
                 if command_argument and command_argument.isdigit():
@@ -464,8 +476,6 @@ class UIController:
         消费底层 LLM 传来的流式数据，负责优雅地打印到终端。
         返回 (最终答案, 思考过程, 元数据字典)
         """
-        self.display_system(msg="已收到 AI 回执，正在生成回答\n", is_flush=True)
-        
         final_answer = ""
         thought_content = ""
         meta_info = {}
@@ -489,7 +499,8 @@ class UIController:
 
             elif chunk_type == "thinking":
                 is_thinking = True
-                print(content, end="", flush=True) if chunk.get("display", True) else None
+                if chunk.get("display", True):
+                    print(f"\033[90m{content}\033[0m", end="", flush=True)
                 thought_content += content
 
             elif chunk_type == "content":

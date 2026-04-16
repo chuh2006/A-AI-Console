@@ -17,3 +17,5 @@ temp/
 old_ver/
 test*
 */test*
+token_spend.py
+.gitignore

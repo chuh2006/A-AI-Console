@@ -14,6 +14,25 @@ class ChatSession:
             self.history.append({"role": "system", "content": system_prompt})
             self.full_context.append({"role": "system", "content": system_prompt})
 
+    def edit_system_prompt(self, new_prompt: str):
+        # 更新 history 中的 system prompt
+        for msg in self.history:
+            if msg["role"] == "system":
+                msg["content"] = new_prompt
+                break
+        else:
+            # 如果 history 中没有 system prompt，则添加一个新的
+            self.history.insert(0, {"role": "system", "content": new_prompt})
+        
+        # 更新 full_context 中的 system prompt
+        for msg in self.full_context:
+            if msg["role"] == "system":
+                msg["content"] = new_prompt
+                break
+        else:
+            # 如果 full_context 中没有 system prompt，则添加一个新的
+            self.full_context.insert(0, {"role": "system", "content": new_prompt})
+
     def get_asker_context(self) -> list[dict]:
         context = []
         role_map = {"user": "assistant", "assistant": "user"}
@@ -136,13 +155,15 @@ class ChatSession:
         self.full_context = new_full_context
         return ret
 
-    def save_to_disk(self, title: str):
+    def save_to_disk(self, title: str, timestamp: bool = False) -> str:
         if title:
             # Normalize any user-provided path-like title to a safe filename stem.
             safe_title = os.path.basename(title.strip())
             safe_title = os.path.splitext(safe_title)[0]
             safe_title = re.sub(r'[\\/*?:"<>|]', '', safe_title)
             title = safe_title.strip()
+            if timestamp:
+                title += "_" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
         if not title:
             title = "chat_" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")

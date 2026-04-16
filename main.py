@@ -3,7 +3,7 @@ import json
 import re
 from ui.ui_controller import UIController
 print("\033[1;32m[S] 启动中")
-print("\r[S] 导入核心库 [0/4]", end="")
+print("\r[S] 导入核心库 [0/5]", end="")
 from core.llm_factory import LLMFactory
 from core.session import ChatSession
 import tools.prompts as prompts
@@ -116,6 +116,12 @@ def main(ui: UIController = None):
             if chat_input["command"] == "quit_without_saving":
                 save = False
                 break
+            if chat_input["command"] == "system":
+                new_system_prompt = chat_input["text"]
+                session.edit_system_prompt(new_system_prompt)
+                ui.display_system("系统提示已更新。")
+                epoch -= 1  # 不增加轮次
+                continue
 
             if chat_input["command"] == "model":
                 new_model_name = ui.resolve_model_name(chat_input["argument"])
@@ -223,6 +229,8 @@ def main(ui: UIController = None):
                     elif "kimi" in model_name:
                         extra_kwargs["enable_thinking"] = ui.get_boolean_input("是否启用Kimi思考功能？", default=True)
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Kimi联网搜索？")
+                    elif "minimax" in model_name.lower():
+                        extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
                     elif "multi-assistant" in model_name:
                         ui.display_warning("multi-assistant 目前处于预览阶段，完全由AI生成代码，并且从未测试，可能存在不稳定和不可预知的表现，请谨慎选择。可直接 Ctrl+C 重新选择模型")
 

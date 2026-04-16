@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, Dict, Generator, List, Tuple
 from .llm_base import BaseLLMClient
-from .llm_openai import OpenAICompatibleClient
+from .llm_openai import OpenAIClient
 from tools.prompts import Prompts
 
 class MultiAssistant(BaseLLMClient):
@@ -88,12 +88,12 @@ class MultiAssistant(BaseLLMClient):
         self._round_robin_index += 1
         return provider
 
-    def _create_client(self, provider: str, stage: str) -> OpenAICompatibleClient:
+    def _create_client(self, provider: str, stage: str) -> OpenAIClient:
         model_name = self.model_map.get(provider, {}).get(stage)
         if not model_name:
             raise RuntimeError(f"未找到 provider={provider} stage={stage} 对应的模型配置")
 
-        return OpenAICompatibleClient(
+        return OpenAIClient(
             api_key=self.api_keys[provider],
             model_name=model_name,
             base_url=self.base_urls.get(provider, ""),
@@ -107,7 +107,7 @@ class MultiAssistant(BaseLLMClient):
                     return content
         return ""
 
-    def _collect_response(self, client: OpenAICompatibleClient, context: List[Dict[str, str]], temperature: float) -> tuple[str, str, Dict[str, Any]]:
+    def _collect_response(self, client: OpenAIClient, context: List[Dict[str, str]], temperature: float) -> tuple[str, str, Dict[str, Any]]:
         content = ""
         thinking = ""
         meta: Dict[str, Any] = {}
