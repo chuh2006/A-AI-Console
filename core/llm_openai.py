@@ -143,13 +143,14 @@ class OpenAIClient(BaseLLMClient):
         loop_count = 0
         get_user_count = 0
         status = -1 # -1: 初始状态，0: 思考，1: 正式回答
-        begin_time = time.time() if using_deepseek_reasoner or using_kimi or using_deepseek_agent else None
+        begin_time = None
 
         # ====================================================
         # 进入多轮 Tool Calling 循环
         # ====================================================
         while True:
             loop_count += 1
+            begin_time = time.time()
 
             req_messages = self.sanitize_tool_call_messages(req_messages)
 
@@ -211,6 +212,10 @@ class OpenAIClient(BaseLLMClient):
                         yield {"type": "meta", "thinking_time": time.time() - begin_time}
                         isThinkingTime = False
                     yield {"type": "content", "content": delta.content}
+
+            if isThinkingTime:
+                yield {"type": "meta", "thinking_time": time.time() - begin_time}
+                isThinkingTime = False
 
             # ====================================================
             # 检查当前轮次是否触发了工具

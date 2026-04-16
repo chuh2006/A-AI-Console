@@ -471,7 +471,7 @@ class UIController:
             print("\033[0m", end="", flush=True)
         print()
     
-    def render_stream(self, stream: Generator[Dict[str, Any], None, None]) -> Tuple[str, str, Dict]:
+    def _render_stream_legacy(self, stream: Generator[Dict[str, Any], None, None]) -> Tuple[str, str, Dict]:
         """
         消费底层 LLM 传来的流式数据，负责优雅地打印到终端。
         返回 (最终答案, 思考过程, 元数据字典)
@@ -542,6 +542,123 @@ class UIController:
             
         return final_answer, thought_content, meta_info
     
+    def render_stream(self, stream: Generator[Dict[str, Any], None, None]) -> Tuple[str, str, Dict]:
+        final_answer = ""
+        thought_content = ""
+        meta_info = {
+            "ocr_results": [],
+            "thinking_times": [],
+        }
+        is_thinking = False
+        pending_thinking_boundary = False
+        pending_thinking_time = None
+        last_output_ended_with_newline = True
+
+        def _append_unique_meta_items(key: str, values: Any) -> None:
+            if values is None:
+                return
+            if not isinstance(values, list):
+                values = [values]
+            target = meta_info.setdefault(key, [])
+            for value in values:
+                if value not in target:
+                    target.append(value)
+
+        def _mark_output_tail(text: str) -> None:
+            nonlocal last_output_ended_with_newline
+            last_output_ended_with_newline = str(text).endswith("\n")
+
+        def _ensure_line_break() -> None:
+            nonlocal last_output_ended_with_newline
+            if not last_output_ended_with_newline:
+                print()
+                last_output_ended_with_newline = True
+
+        def _flush_thinking_footer(show_transition: bool) -> None:
+            nonlocal is_thinking, pending_thinking_boundary, pending_thinking_time, last_output_ended_with_newline
+            if not pending_thinking_boundary:
+                return
+            _ensure_line_break()
+            if pending_thinking_time is not None and pending_thinking_time > 0:
+                print(f"\033[90m(思考耗时: {pending_thinking_time:.2f}秒)\033[0m")
+                meta_info["thinking_time"] = pending_thinking_time
+                last_output_ended_with_newline = True
+            if show_transition:
+                print("\033[92m思考结束，开始输出...\033[0m")
+                last_output_ended_with_newline = True
+            is_thinking = False
+            pending_thinking_boundary = False
+            pending_thinking_time = None
+
+        for chunk in stream:
+            if not isinstance(chunk, dict):
+                continue
+
+            chunk_type = chunk.get("type")
+            content = chunk.get("content", "")
+            content_dict = chunk.get("content_dict", {})
+
+            if chunk_type == "meta_ocr":
+                meta_info["ocr_results"].append({
+                    "image_path": chunk["image_path"],
+                    "ocr_text": chunk["ocr_text"]
+                })
+            elif chunk_type == "thinking":
+                if not is_thinking:
+                    _ensure_line_break()
+                is_thinking = True
+                pending_thinking_boundary = True
+                if chunk.get("display", True):
+                    print(f"\033[90m{content}\033[0m", end="", flush=True)
+                    _mark_output_tail(content)
+                thought_content += content
+            elif chunk_type == "content":
+                _flush_thinking_footer(show_transition=False)
+                print(content, end="", flush=True)
+                _mark_output_tail(content)
+                final_answer += content
+            elif chunk_type == "meta":
+                thinking_time = chunk.get("thinking_time", None)
+                if isinstance(thinking_time, (int, float)) and thinking_time > 0:
+                    pending_thinking_time = float(thinking_time)
+                    meta_info["thinking_time"] = float(thinking_time)
+                    meta_info["thinking_times"].append(float(thinking_time))
+
+                for list_key in ("uris", "search_keywords", "assistant_questions", "user_inputs", "tool_call_history"):
+                    if list_key in chunk:
+                        _append_unique_meta_items(list_key, chunk.get(list_key))
+
+                for key, value in chunk.items():
+                    if key in {"type", "thinking_time", "uris", "search_keywords", "assistant_questions", "user_inputs", "tool_call_history"}:
+                        continue
+                    meta_info[key] = value
+            elif chunk_type == "system":
+                _flush_thinking_footer(show_transition=False)
+                _ensure_line_break()
+                print(f"\033[94m[S] {content}\033[0m", end="", flush=True)
+                _mark_output_tail(content)
+            elif chunk_type == "abstract":
+                _flush_thinking_footer(show_transition=False)
+                title = content_dict.get("title", "")
+                abstract = content_dict.get("abstract", "")
+                self._print_typewriter(title, color_code="\033[97m")
+                self._print_typewriter(abstract, color_code="\033[90m")
+                last_output_ended_with_newline = True
+            elif chunk_type == "input":
+                _flush_thinking_footer(show_transition=False)
+                final_answer = self.get_user_input(prompt="璇疯嚜宸卞洖绛旓細")
+                last_output_ended_with_newline = True
+            elif chunk_type == "error_msg":
+                _flush_thinking_footer(show_transition=False)
+                final_answer = self.get_user_input(prompt="璇疯緭鍏ラ敊璇秷鎭細")
+                last_output_ended_with_newline = True
+
+        _flush_thinking_footer(show_transition=False)
+        if not last_output_ended_with_newline:
+            print()
+
+        return final_answer, thought_content, meta_info
+
     def display_warning(self, msg: str):
         """标准化的警告输出（黄色）"""
         if msg.startswith("\n"):
