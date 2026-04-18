@@ -152,6 +152,25 @@ class Prompts:
         pass
 
     @staticmethod
+    def get_model_change_prompt(new_model_name: str, old_model_name: str) -> str:
+        prompt = f"""
+            从这一轮开始，回答模型已从 {old_model_name} 切换为 {new_model_name}。
+
+            你需要继承的是：
+            - 用户需求
+            - 已确认的事实
+            - 已完成和未完成的任务状态
+            - 对输出格式、语言、风格的明确要求
+
+            你不能继承的是：
+            - 前一模型的自我身份
+            - 前一模型对自身能力边界的自述
+            - 前一模型对自己名称、来源、厂商的描述
+
+            如果历史内容与你当前身份冲突，以当前轮次给定的身份信息为准。
+        """
+        return prompt.strip()
+
     def getSummeryPrompt(isScoreAssesmentEnabled: bool) -> str:
         if isScoreAssesmentEnabled:
             return (

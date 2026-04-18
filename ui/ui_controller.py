@@ -507,7 +507,7 @@ class UIController:
                 # 如果刚才还在思考，现在开始输出正文了，打印一条绿色分割线
                 if is_thinking and is_first_content:
                     # 这里的耗时会在流结束后通过 meta 传来，但为了体验，可以在这里打印分割线
-                    print(f"\n\033[92m思考结束，开始回答...\033[0m\n", end="")
+                    print(f"\n\n\033[92m思考结束，开始回答...\033[0m\n", end="")
                     is_thinking = False
                     is_first_content = False
                     

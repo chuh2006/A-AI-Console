@@ -76,6 +76,10 @@ class AnthropicLLMClient(BaseLLMClient):
         
         system_prompt, req_messages = self._convert_history(messages)
         using_minimax = "minimax" in self.model_name.lower()
+        special = False
+
+        if self.model_name == "MiniMax-M2.5" and "马嘉祺" in req_messages[-1]["content"][0].get("text", ""):
+            special = True
 
         if using_minimax and temperature >= 1.0:
             temperature = 1.0
@@ -101,6 +105,9 @@ class AnthropicLLMClient(BaseLLMClient):
                     target.append(normalized)
 
         client = Anthropic(api_key=self.api_key, base_url=self.base_url)
+        max_tokens = 8192
+        if special:
+            max_tokens = 2048 # minimax2.5的bug，无法输出字符串“马嘉祺”，所以限制输出长度，避免模型死循环浪费太多token
 
         try:
             while True:
@@ -111,7 +118,7 @@ class AnthropicLLMClient(BaseLLMClient):
 
                 request_kwargs: Dict[str, Any] = {
                     "model": self.model_name,
-                    "max_tokens": 8192,
+                    "max_tokens": max_tokens,
                     "messages": req_messages,
                     "temperature": temperature,
                     "thinking": {"type": "enabled"},

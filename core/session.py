@@ -155,6 +155,10 @@ class ChatSession:
         self.full_context = new_full_context
         return ret
 
+    def switch_model(self, new_model_name: str, old_model_name: str):
+        prompt = prompts.Prompts.get_model_change_prompt(new_model_name, old_model_name)
+        self.history.append({"role": "system", "content": prompt})
+
     def save_to_disk(self, title: str, timestamp: bool = False) -> str:
         if title:
             # Normalize any user-provided path-like title to a safe filename stem.

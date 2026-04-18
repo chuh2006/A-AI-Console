@@ -129,6 +129,8 @@ def main(ui: UIController = None):
                     ui.display_warning("模型名不能为空。")
                     epoch -= 1  # 不增加轮次
                     continue
+                if current_model_name != new_model_name:
+                    session.switch_model(new_model_name, current_model_name)
                 current_model_name = new_model_name
                 ui.display_system(f"当前模型已切换为: {current_model_name}")
                 epoch -= 1  # 不增加轮次
@@ -279,12 +281,14 @@ def main(ui: UIController = None):
                         raise KeyboardInterrupt  # 退出整个程序
             
             # 如果 answer 为 None，说明用户取消了重试，直接跳过后续处理，进入下一轮
-            if not answer:
+            if answer is None:
                 continue
 
             # 2.6 针对回答的随机化处理
-            is_a_random = ui.get_boolean_input("回答是否加随机？")
-            final_answer = answer
+            is_a_random = False
+            final_answer = answer if answer else "none"
+            if answer:
+                is_a_random = ui.get_boolean_input("回答是否加随机？")
             if is_a_random:
                 random_ctx_ans = getRandomSpawnerDescriptionContext(isFullRandom=ui.get_boolean_input("回答是否完全随机？"))
                 # 将随机字符添加到原答案中
