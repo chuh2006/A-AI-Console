@@ -81,7 +81,7 @@ def main(ui: UIController = None):
         conversation_history, temperature, full_history = reader.read_from_history(file_name)
         
         # --- 自动提取并清理标题 ---
-        base_name = file_name.replace(".md", "")
+        base_name = os.path.splitext(file_name)[0]
         # 正则匹配并替换结尾的 (数字) 为空字符串
         chat_title = re.sub(r'\(\d+\)$', '', base_name)
         ui.display_system(f"已恢复对话，当前标题：{chat_title}")
