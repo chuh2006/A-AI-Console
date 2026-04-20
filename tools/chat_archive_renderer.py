@@ -1,7 +1,12 @@
 import ast
+import base64
 import html
+import mimetypes
 import re
 from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+from latex2mathml.converter import convert as latex_to_mathml
 
 
 def render_chat_archive_html(full_context: list[dict], title: str) -> str:
@@ -16,6 +21,7 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{title_html}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
     <style>
         :root {{
             --bg: #ffffff;
@@ -27,6 +33,8 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             --code-bg: #1f1f1f;
             --code-text: #f3f3f3;
             --shadow: 0 10px 30px rgba(51, 41, 28, 0.08);
+            --meta-summary: #847c70;
+            --meta-text: #6d665c;
         }}
         * {{
             box-sizing: border-box;
@@ -143,6 +151,19 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             max-width: 100%;
             vertical-align: top;
         }}
+        details.assistant-meta-box[open] {{
+            width: min(100%, 760px);
+        }}
+        details.assistant-meta-box summary {{
+            color: var(--meta-summary);
+        }}
+        details.assistant-meta-box[open] summary {{
+            color: var(--meta-summary);
+        }}
+        details.assistant-meta-box .meta-content,
+        details.assistant-meta-box .message-content {{
+            color: var(--meta-text);
+        }}
         .assistant-meta-inline {{
             display: inline-flex;
             align-items: center;
@@ -249,10 +270,56 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             background: transparent;
             color: inherit;
         }}
+        .message-content table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0 0 0.95em;
+            display: block;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.88);
+        }}
+        .message-content th,
+        .message-content td {{
+            border: 1px solid var(--line);
+            padding: 8px 10px;
+            min-width: 88px;
+            vertical-align: top;
+        }}
+        .message-content th {{
+            background: #f6efe5;
+            font-weight: 700;
+        }}
+        .message-content tr:nth-child(even) td {{
+            background: rgba(255, 255, 255, 0.55);
+        }}
+        .message-content .katex-display {{
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding: 0.15em 0;
+        }}
         .message-content a {{
             color: #0f5ec9;
             text-decoration: none;
         }}
+            .message-content .math-inline,
+            .message-content .math-block {{
+                overflow-x: auto;
+                overflow-y: hidden;
+            }}
+            .message-content .math-inline {{
+                display: inline-flex;
+                vertical-align: middle;
+            }}
+            .message-content .math-block {{
+                display: block;
+                margin: 0.35em 0;
+            }}
+            .message-content .math-inline math,
+            .message-content .math-block math {{
+                font-size: 1em;
+            }}
         .message-content a:hover {{
             text-decoration: underline;
         }}
@@ -266,21 +333,27 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             border: 1px solid var(--line);
             border-radius: 14px;
             padding: 10px;
+            overflow: hidden;
+        }}
+        .message-content img {{
+            display: block;
+            width: auto;
+            max-width: 100%;
+            height: auto;
+            max-height: min(56vh, 460px);
+            object-fit: contain;
+            border-radius: 10px;
+            background: #fff;
         }}
         .image-card img {{
             display: block;
             width: 100%;
+            max-width: 100%;
+            height: auto;
             border-radius: 10px;
-            max-height: 420px;
+            max-height: min(56vh, 420px);
             object-fit: contain;
             background: #fff;
-        }}
-        .image-card a {{
-            display: inline-block;
-            margin-top: 8px;
-            font-size: 13px;
-            color: var(--muted);
-            text-decoration: none;
         }}
         .meta-section + .meta-section {{
             margin-top: 16px;
@@ -382,6 +455,10 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             .user-bubble {{
                 max-width: 100%;
             }}
+            .message-content img,
+            .image-card img {{
+                max-height: 46vh;
+            }}
         }}
     </style>
 </head>
@@ -400,6 +477,8 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             {turns_html}
         </section>
     </main>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
     <script>
         (() => {{
             const detailsList = Array.from(document.querySelectorAll('details.meta-box'));
@@ -429,6 +508,23 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             }});
 
             syncButtonLabel();
+
+            if (typeof window.renderMathInElement === 'function') {{
+                const mathRoot = document.querySelector('.page');
+                if (mathRoot) {{
+                    window.renderMathInElement(mathRoot, {{
+                    delimiters: [
+                        {{ left: '$$', right: '$$', display: true }},
+                        {{ left: '\\[', right: '\\]', display: true }},
+                        {{ left: '\\(', right: '\\)', display: false }},
+                        {{ left: '$', right: '$', display: false }},
+                    ],
+                    throwOnError: false,
+                    strict: 'ignore',
+                    ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+                    }});
+                }}
+            }}
         }})();
     </script>
 </body>
@@ -643,10 +739,8 @@ def _render_user_meta(item: dict) -> str:
         cards = []
         for path in image_paths:
             path_str = str(path)
-            uri = _path_to_uri(path_str)
-            cards.append(
-                f'<div class="image-card"><img src="{uri}" alt="用户上传图片"><a href="{uri}">{html.escape(path_str)}</a></div>'
-            )
+            uri = _normalize_image_src(path_str)
+            cards.append(f'<div class="image-card"><img src="{uri}" alt="用户上传图片"></div>')
         return f'<div class="image-grid">{"".join(cards)}</div>'
 
     if role == "user_original":
@@ -712,6 +806,75 @@ def _render_assistant_meta(items: list[dict]) -> str:
 """
 
 
+def _render_assistant_meta(items: list[dict]) -> str:
+    if not items:
+        return ""
+
+    model_name = _extract_model_name(items)
+    thinking_time = _extract_thinking_time(items)
+    thinking_summary = _build_assistant_summary(model_name, thinking_time)
+    thinking_sections = []
+    process_sections = []
+
+    for item in items:
+        role = item.get("role")
+        content = item.get("content")
+
+        if role == "assistant_thinking":
+            thinking_sections.append(_wrap_meta_section("思考内容", _render_markdown_block(str(content))))
+        elif role == "tool_call_history":
+            process_sections.append(_wrap_meta_section("工具调用", _render_tool_history(content)))
+        elif role == "search_results_links":
+            process_sections.append(_wrap_meta_section("搜索来源", _render_link_list(content)))
+        elif role == "tool_ocr_extraction":
+            process_sections.append(_wrap_meta_section("OCR 提取", _render_ocr_result(content)))
+        elif role == "enabled_tools":
+            process_sections.append(_wrap_meta_section("启用工具", _render_chip_list(content)))
+        elif role == "search_keywords":
+            process_sections.append(_wrap_meta_section("搜索关键词", _render_chip_list(content)))
+        elif role == "assistant_questions":
+            thinking_sections.append(_wrap_meta_section("追问列表", _render_list_block(content)))
+        elif role == "user_inputs":
+            thinking_sections.append(_wrap_meta_section("用户补充", _render_list_block(content)))
+        elif role == "thinking_level":
+            process_sections.append(_wrap_meta_section("思考等级", _render_chip_list([content])))
+        elif role == "assistant_original_answer":
+            process_sections.append(_wrap_meta_section("原始回答", _render_markdown_block(str(content))))
+        elif role in {"model", "assistant_thinking_time"}:
+            continue
+        else:
+            process_sections.append(_wrap_meta_section(str(role), _render_data_block(content)))
+
+    blocks = []
+    if thinking_sections:
+        blocks.append(
+            f"""
+<details class="meta-box assistant-meta-box assistant-thinking-box" style="margin-bottom: 14px;">
+    <summary>{_render_summary_content(thinking_summary or "查看思考内容")}</summary>
+    <div class="meta-content">
+        {"".join(thinking_sections)}
+    </div>
+</details>
+"""
+        )
+    if process_sections:
+        process_summary = f"{model_name} 过程元数据" if model_name else "查看过程元数据"
+        blocks.append(
+            f"""
+<details class="meta-box assistant-meta-box assistant-process-box" style="margin-bottom: 14px;">
+    <summary>{_render_summary_content(process_summary)}</summary>
+    <div class="meta-content">
+        {"".join(process_sections)}
+    </div>
+</details>
+"""
+        )
+
+    if not blocks:
+        return f'<div class="assistant-meta-inline">{html.escape(thinking_summary)}</div>' if thinking_summary else ""
+    return "".join(blocks)
+
+
 def _render_tool_history(content) -> str:
     items = _coerce_tool_history(content)
     if not items:
@@ -738,11 +901,11 @@ def _render_ocr_result(content) -> str:
     if isinstance(content, dict):
         image_path = str(content.get("image_path", ""))
         body = _render_markdown_block(str(content.get("ocr_text", "")))
-        extra = ""
+        image_preview = ""
         if image_path:
-            uri = _path_to_uri(image_path)
-            extra = f'<div style="margin-bottom: 10px;"><a href="{uri}">{html.escape(image_path)}</a></div>'
-        return extra + body
+            uri = _normalize_image_src(image_path)
+            image_preview = f'<div class="image-grid" style="margin-bottom: 10px;"><div class="image-card"><img src="{uri}" alt="OCR 图片"></div></div>'
+        return image_preview + body
     return _render_data_block(content)
 
 
@@ -884,6 +1047,127 @@ def _normalize_href(href: str) -> str:
     return html.escape(href, quote=True)
 
 
+_IMAGE_DATA_URI_CACHE: dict[str, str] = {}
+
+
+def _normalize_image_src(src: str) -> str:
+    raw = html.unescape(str(src or "")).strip()
+    if not raw:
+        return ""
+
+    data_uri = _to_data_uri_if_local_image(src)
+    if data_uri:
+        return html.escape(data_uri, quote=True)
+
+    # 图片展示优先走本地绝对 URI，避免相对路径在再次打开历史记录时失效。
+    fallback_uri = _local_image_source_to_uri(raw)
+    if fallback_uri:
+        return fallback_uri
+    return _normalize_href(raw)
+
+
+def _to_data_uri_if_local_image(src: str) -> str:
+    path = _resolve_local_image_path(src)
+    if path is None:
+        return ""
+
+    cache_key = str(path).lower()
+    cached = _IMAGE_DATA_URI_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    mime_type, _ = mimetypes.guess_type(path.name)
+    if not mime_type or not mime_type.startswith("image/"):
+        return ""
+
+    try:
+        binary = path.read_bytes()
+    except OSError:
+        return ""
+
+    encoded = base64.b64encode(binary).decode("ascii")
+    data_uri = f"data:{mime_type};base64,{encoded}"
+    _IMAGE_DATA_URI_CACHE[cache_key] = data_uri
+    return data_uri
+
+
+def _resolve_local_image_path(src: str) -> Path | None:
+    raw = html.unescape(str(src or "")).strip()
+    if not raw:
+        return None
+
+    lowered = raw.lower()
+    if lowered.startswith("data:"):
+        return None
+
+    if re.match(r"^[a-zA-Z]:[\\/]", raw):
+        candidate = Path(raw).expanduser()
+    else:
+        parsed = urlparse(raw)
+        if parsed.scheme and parsed.scheme.lower() not in {"file"}:
+            return None
+
+        if parsed.scheme.lower() == "file":
+            uri_path = _file_uri_to_path(raw)
+            if uri_path is None:
+                return None
+            candidate = uri_path
+        else:
+            candidate = Path(raw).expanduser()
+
+    try:
+        if not candidate.is_absolute():
+            candidate = (Path.cwd() / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+    except OSError:
+        return None
+
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _local_image_source_to_uri(src: str) -> str:
+    raw = html.unescape(str(src or "")).strip()
+    if not raw:
+        return ""
+
+    if raw.lower().startswith("data:"):
+        return html.escape(raw, quote=True)
+
+    if re.match(r"^[a-zA-Z]:[\\/]", raw):
+        return _path_to_uri(raw)
+
+    parsed = urlparse(raw)
+    scheme = parsed.scheme.lower()
+    if scheme and scheme not in {"file"}:
+        return ""
+
+    if scheme == "file":
+        file_path = _file_uri_to_path(raw)
+        if file_path is None:
+            return ""
+        return _path_to_uri(str(file_path))
+
+    return _path_to_uri(raw)
+
+
+def _file_uri_to_path(uri: str) -> Path | None:
+    parsed = urlparse(uri)
+    if parsed.scheme.lower() != "file":
+        return None
+
+    path = unquote(parsed.path or "")
+    netloc = parsed.netloc or ""
+    if netloc and netloc.lower() != "localhost":
+        return Path(f"//{netloc}{path}")
+
+    if re.match(r"^/[a-zA-Z]:", path):
+        path = path[1:]
+    return Path(path)
+
+
 def _render_markdown_block(text: str) -> str:
     placeholders = {}
     source = text.replace("\r\n", "\n")
@@ -897,6 +1181,27 @@ def _render_markdown_block(text: str) -> str:
         return key
 
     source = re.sub(r"```([^\n`]*)\n(.*?)```", replace_code_block, source, flags=re.DOTALL)
+
+    def replace_math_block(match):
+        key = f"__MATH_BLOCK_{len(placeholders)}__"
+        placeholders[key] = _render_math_mathml(match.group(1), display_mode=True)
+        return f"\n{key}\n"
+
+    def replace_math_inline(match):
+        key = f"__MATH_BLOCK_{len(placeholders)}__"
+        placeholders[key] = _render_math_mathml(match.group(1), display_mode=False)
+        return key
+
+    source = re.sub(r"\\\[([\s\S]*?)\\\]", replace_math_block, source)
+    source = re.sub(r"\$\$([\s\S]*?)\$\$", replace_math_block, source)
+    source = re.sub(r"\\\(([\s\S]*?)\\\)", replace_math_inline, source)
+
+    def replace_single_dollar(match):
+        prefix = match.group(1)
+        expression = match.group(2)
+        return f"{prefix}{_render_math_placeholder(expression, placeholders, display_mode=False)}"
+
+    source = re.sub(r"(^|[^\\])\$(?!\$)([^\n$]*?)\$(?!\$)", replace_single_dollar, source)
     source = html.escape(source)
     source = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', lambda m: _render_inline_image(m.group(1), m.group(2)), source)
     source = re.sub(
@@ -914,6 +1219,7 @@ def _render_markdown_block(text: str) -> str:
     list_items = []
     list_tag = None
     blockquote_lines = []
+    index = 0
 
     def flush_paragraph():
         nonlocal paragraph_lines
@@ -934,12 +1240,14 @@ def _render_markdown_block(text: str) -> str:
             html_parts.append(f"<blockquote>{'<br>'.join(blockquote_lines)}</blockquote>")
             blockquote_lines = []
 
-    for line in lines:
+    while index < len(lines):
+        line = lines[index]
         stripped = line.strip()
         if not stripped:
             flush_paragraph()
             flush_list()
             flush_blockquote()
+            index += 1
             continue
 
         if stripped in placeholders:
@@ -947,7 +1255,34 @@ def _render_markdown_block(text: str) -> str:
             flush_list()
             flush_blockquote()
             html_parts.append(placeholders[stripped])
+            index += 1
             continue
+
+        if index + 1 < len(lines):
+            header_candidate = lines[index]
+            separator_candidate = lines[index + 1]
+            if _looks_like_markdown_table(header_candidate, separator_candidate):
+                flush_paragraph()
+                flush_list()
+                flush_blockquote()
+
+                table_rows = [header_candidate, separator_candidate]
+                row_index = index + 2
+                while row_index < len(lines):
+                    row_line = lines[row_index]
+                    row_stripped = row_line.strip()
+                    if not row_stripped:
+                        break
+                    if row_stripped in placeholders:
+                        break
+                    if not _is_markdown_table_row(row_line):
+                        break
+                    table_rows.append(row_line)
+                    row_index += 1
+
+                html_parts.append(_render_markdown_table(table_rows))
+                index = row_index
+                continue
 
         heading_match = re.match(r"^(#{1,4})\s+(.*)$", stripped)
         if heading_match:
@@ -956,6 +1291,7 @@ def _render_markdown_block(text: str) -> str:
             flush_blockquote()
             level = len(heading_match.group(1))
             html_parts.append(f"<h{level}>{heading_match.group(2)}</h{level}>")
+            index += 1
             continue
 
         quote_match = re.match(r"^&gt;\s?(.*)$", stripped)
@@ -963,6 +1299,7 @@ def _render_markdown_block(text: str) -> str:
             flush_paragraph()
             flush_list()
             blockquote_lines.append(quote_match.group(1))
+            index += 1
             continue
 
         flush_blockquote()
@@ -977,10 +1314,12 @@ def _render_markdown_block(text: str) -> str:
                 flush_list()
             list_tag = tag
             list_items.append(f"<li>{item}</li>")
+            index += 1
             continue
 
         flush_list()
         paragraph_lines.append(stripped)
+        index += 1
 
     flush_paragraph()
     flush_list()
@@ -992,8 +1331,91 @@ def _render_markdown_block(text: str) -> str:
     return f'<div class="message-content">{rendered}</div>'
 
 
+def _split_markdown_table_row(line: str) -> list[str]:
+    raw = str(line or "").strip()
+    if raw.startswith("|"):
+        raw = raw[1:]
+    if raw.endswith("|"):
+        raw = raw[:-1]
+    return [cell.strip() for cell in raw.split("|")]
+
+
+def _is_markdown_table_row(line: str) -> bool:
+    row = str(line or "").strip()
+    return "|" in row and not row.startswith("#") and not row.startswith("&gt;")
+
+
+def _looks_like_markdown_table(header_line: str, separator_line: str) -> bool:
+    if not _is_markdown_table_row(header_line):
+        return False
+    sep_cells = _split_markdown_table_row(separator_line)
+    if not sep_cells:
+        return False
+    for cell in sep_cells:
+        if not re.match(r"^:?-{3,}:?$", cell):
+            return False
+    return True
+
+
+def _render_markdown_table(lines: list[str]) -> str:
+    header_cells = _split_markdown_table_row(lines[0])
+    align_cells = _split_markdown_table_row(lines[1]) if len(lines) > 1 else []
+    body_lines = lines[2:] if len(lines) > 2 else []
+    col_count = max(len(header_cells), len(align_cells), *(len(_split_markdown_table_row(row)) for row in body_lines), 1)
+
+    def resolve_align(cell: str) -> str:
+        cell = cell.strip()
+        if cell.startswith(":") and cell.endswith(":"):
+            return "center"
+        if cell.endswith(":"):
+            return "right"
+        return "left"
+
+    alignments = [resolve_align(align_cells[idx]) if idx < len(align_cells) else "left" for idx in range(col_count)]
+
+    def to_cells(cells: list[str], tag: str) -> str:
+        normalized = cells + [""] * (col_count - len(cells))
+        html_cells = []
+        for idx, value in enumerate(normalized):
+            align = alignments[idx] if idx < len(alignments) else "left"
+            html_cells.append(f'<{tag} style="text-align:{align};">{value}</{tag}>')
+        return "".join(html_cells)
+
+    header_html = f"<thead><tr>{to_cells(header_cells, 'th')}</tr></thead>"
+    body_html = ""
+    if body_lines:
+        body_rows = []
+        for row in body_lines:
+            row_cells = _split_markdown_table_row(row)
+            body_rows.append(f"<tr>{to_cells(row_cells, 'td')}</tr>")
+        body_html = f"<tbody>{''.join(body_rows)}</tbody>"
+    return f"<table>{header_html}{body_html}</table>"
+
+
+def _render_math_placeholder(expression: str, placeholders: dict, display_mode: bool) -> str:
+    key = f"__MATH_BLOCK_{len(placeholders)}__"
+    placeholders[key] = _render_math_mathml(expression, display_mode=display_mode)
+    return key
+
+
+def _render_math_mathml(expression: str, display_mode: bool) -> str:
+    source = str(expression or "").strip()
+    if not source:
+        return ""
+
+    try:
+        mathml = latex_to_mathml(source)
+    except Exception:
+        fallback = html.escape(source)
+        class_name = "math-block" if display_mode else "math-inline"
+        return f'<span class="{class_name}">{fallback}</span>'
+
+    class_name = "math-block" if display_mode else "math-inline"
+    return f'<div class="{class_name}">{mathml}</div>' if display_mode else f'<span class="{class_name}">{mathml}</span>'
+
+
 def _render_inline_image(alt: str, src: str) -> str:
     real_src = html.unescape(src)
-    uri = _normalize_href(real_src)
+    uri = _normalize_image_src(real_src)
     alt_text = html.escape(html.unescape(alt))
     return f'<span class="image-card" style="display:block;margin:12px 0;"><img src="{uri}" alt="{alt_text}"></span>'

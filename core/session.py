@@ -117,9 +117,31 @@ class ChatSession:
         self._auto_clean_context()
 
     def rollback_last_user_message(self):
-        if self.history and self.history[-1]["role"] == "user":
-            self.history.pop()
-        while self.full_context and self.full_context[-1]["role"] != "assistant_answer":
+        has_pending_user = bool(self.history and self.history[-1].get("role") == "user")
+        if not has_pending_user:
+            return
+
+        self.history.pop()
+
+        # 优先按 epoch_count 回滚当前轮次，避免在首轮失败时误删 directions/system。
+        rollback_start = -1
+        for idx in range(len(self.full_context) - 1, -1, -1):
+            message = self.full_context[idx]
+            if isinstance(message, dict) and message.get("role") == "epoch_count":
+                rollback_start = idx
+                break
+
+        if rollback_start >= 0:
+            self.full_context = self.full_context[:rollback_start]
+            return
+
+        # 兼容旧记录：若没有 epoch 标记，仅移除本轮用户侧尾部条目。
+        rollback_roles = {"user", "user_original", "image_uploaded", "enabled_tools"}
+        while self.full_context:
+            tail = self.full_context[-1]
+            role = str(tail.get("role", "")) if isinstance(tail, dict) else ""
+            if role not in rollback_roles:
+                break
             self.full_context.pop()
 
     def get_history(self) -> list:
@@ -146,45 +168,98 @@ class ChatSession:
             if msg["role"] == "epoch_count" and int(msg["content"]) >= epoch + 1:
                 break
             new_full_context.append(msg)
-            if msg["role"] in ["user", "assistant", "system"]:
-                new_history.append(msg)
-                ret = msg["content"] if msg["role"] == "user" else ret
+
+            role = str(msg.get("role", ""))
+            content = msg.get("content", "")
+            if role in ["user", "system", "assistant"]:
+                new_history.append({"role": role, "content": content})
+                ret = content if role == "user" else ret
+                continue
+
+            # 历史导出中助手正式回答记录为 assistant_answer，fork 后需要映射回 history 的 assistant。
+            if role == "assistant_answer":
+                new_history.append({"role": "assistant", "content": content})
         self.history = new_history
         self.full_context = new_full_context
         return ret
 
+    def _is_model_switch_prompt(self, content: str) -> bool:
+        text = str(content or "")
+        return (
+            "回答模型已从" in text
+            and "你不能继承的是" in text
+            and "如果历史内容与你当前身份冲突" in text
+        )
+
     def switch_model(self, new_model_name: str, old_model_name: str):
         prompt = prompts.Prompts.get_model_change_prompt(new_model_name, old_model_name)
+        self.history = [
+            msg
+            for msg in self.history
+            if not (
+                isinstance(msg, dict)
+                and msg.get("role") == "system"
+                and self._is_model_switch_prompt(str(msg.get("content", "")))
+            )
+        ]
         self.history.append({"role": "system", "content": prompt})
 
-    def save_to_disk(self, title: str, timestamp: bool = False) -> str:
-        if title:
-            safe_title = os.path.basename(title.strip())
-            safe_title = os.path.splitext(safe_title)[0]
-            safe_title = re.sub(r'[\\/*?:"<>|]', "", safe_title)
-            title = safe_title.strip()
-            if timestamp:
-                title += "_" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    def _sanitize_save_name(self, raw_name: str) -> str:
+        safe_title = os.path.basename(str(raw_name or "").strip())
+        safe_title = os.path.splitext(safe_title)[0]
+        safe_title = re.sub(r'[\\/*?:"<>|]', "", safe_title)
+        return safe_title.strip()
 
-        if not title:
-            title = "chat_" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    def _resolve_save_filepath(
+        self,
+        title: str,
+        timestamp: bool = False,
+        basename: str | None = None,
+        overwrite: bool = False,
+    ) -> str:
+        resolved_name = self._sanitize_save_name(basename) if basename else self._sanitize_save_name(title)
+        if resolved_name and timestamp:
+            resolved_name += "_" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        if not resolved_name:
+            resolved_name = "chat_" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
         os.makedirs("chat_result", exist_ok=True)
-        base_filepath = f"chat_result/{title}"
+        base_filepath = os.path.join("chat_result", resolved_name)
+        if overwrite:
+            return base_filepath
+
         counter = 1
         filepath = base_filepath
-
         while os.path.exists(f"{filepath}.json") or os.path.exists(f"{filepath}.html"):
             filepath = f"{base_filepath}({counter})"
             counter += 1
+        return filepath
+
+    def save_to_disk(
+        self,
+        title: str,
+        timestamp: bool = False,
+        save_html: bool = True,
+        overwrite: bool = False,
+        basename: str | None = None,
+    ) -> str:
+        filepath = self._resolve_save_filepath(
+            title=title,
+            timestamp=timestamp,
+            basename=basename,
+            overwrite=overwrite,
+        )
 
         json_filepath = f"{filepath}.json"
-        html_filepath = f"{filepath}.html"
-
         with open(json_filepath, "w", encoding="utf-8") as f:
             json.dump(self.full_context, f, ensure_ascii=False, indent=2)
 
-        html_content = render_chat_archive_html(self.full_context, title)
+        if not save_html:
+            return json_filepath
+
+        html_filepath = f"{filepath}.html"
+        html_title = self._sanitize_save_name(title) or os.path.basename(filepath)
+        html_content = render_chat_archive_html(self.full_context, html_title)
         with open(html_filepath, "w", encoding="utf-8") as f:
             f.write(html_content)
 

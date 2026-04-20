@@ -327,11 +327,15 @@ def main(ui: UIController = None):
     ui.stop_all_spinners()
     clean_temp_directory()
     
-if __name__ == "__main__":
+if __name__ == "__main__":  
     ui = UIController()
+    enter_browser_ui = False
     while True:
         ui.display_system("欢迎")
         try:
+            enter_browser_ui = ui.get_boolean_input("新增浏览器UI模式，现代化界面，更多功能，欢迎体验\n是否进入", default=True)
+            if enter_browser_ui:
+                break
             main(ui)
         except KeyboardInterrupt:
             ui.display_warning("检测到强制中断 (Ctrl+C)。")
@@ -341,3 +345,10 @@ if __name__ == "__main__":
         if not q:
             ui.display_system("退出")
             break
+    if enter_browser_ui:
+        ui.display_system("正在启动浏览器UI模式...")
+        try:
+            from browser_main import start_browser_ui
+            start_browser_ui()
+        except Exception as e:
+            ui.display_error(f"启动浏览器UI模式失败: {e}")
