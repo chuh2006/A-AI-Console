@@ -5,6 +5,7 @@ class BrowserJSMixin:
     def _build_js(self) -> str:
         return r"""
 (() => {
+    const CONTEXT_TIER_WARNING_THRESHOLD = 32000;
     const bootstrap = window.__NEODS_BROWSER_BOOTSTRAP__ || {
         models: [],
         defaultModel: "deepseek",
@@ -24,6 +25,9 @@ class BrowserJSMixin:
     const state = {
         sessionId: null,
         isStreaming: false,
+        streamAbortController: null,
+        stopStreamRequested: false,
+        streamStopBlocked: false,
         isExpanded: false,
         attachments: [],
         settingsByModel: {},
@@ -42,6 +46,7 @@ class BrowserJSMixin:
         contextLimitTokens: 100000,
         totalConversationTokens: 0,
         latestAssistantThinking: "",
+        contextTierWarningDismissed: false,
         openRecordActionMenuKey: "",
         pendingDeleteRecord: null,
         browserPreferences: {
@@ -66,9 +71,15 @@ class BrowserJSMixin:
         input: document.getElementById("chat-input"),
         contextMeter: document.getElementById("context-meter"),
         contextMeterRing: document.getElementById("context-meter-ring"),
+        contextMeterShell: document.querySelector(".context-meter-shell"),
         contextMeterValue: document.getElementById("context-meter-value"),
         contextMeterWindow: document.getElementById("context-meter-window"),
         contextMeterTotal: document.getElementById("context-meter-total"),
+        contextMeterToolShare: document.getElementById("context-meter-tool-share"),
+        contextMeterChatShare: document.getElementById("context-meter-chat-share"),
+        contextTierWarning: document.getElementById("context-tier-warning"),
+        contextTierWarningText: document.getElementById("context-tier-warning-text"),
+        contextTierWarningClose: document.getElementById("context-tier-warning-close"),
         contextUsageDetailButton: document.getElementById("context-usage-detail-button"),
         contextMeterStatus: document.getElementById("context-meter-status"),
         usageDetailOverlay: document.getElementById("usage-detail-overlay"),
@@ -119,6 +130,7 @@ class BrowserJSMixin:
         installComposerLayoutObserver();
         await createSession();
         renderControls();
+        updateSendButtonState();
         syncTextareaHeight();
         renderContextUsage();
         refreshTurnNavigator();
@@ -130,7 +142,13 @@ class BrowserJSMixin:
     function bindEvents() {
         refs.attachButton.addEventListener("click", () => refs.fileInput.click());
         refs.fileInput.addEventListener("change", onFilesSelected);
-        refs.sendButton.addEventListener("click", () => void sendMessage());
+        refs.sendButton.addEventListener("click", () => {
+            if (state.isStreaming) {
+                stopStreaming();
+                return;
+            }
+            void sendMessage();
+        });
         refs.modelButton.addEventListener("click", (event) => {
             event.stopPropagation();
             toggleMenu("model");
@@ -181,6 +199,12 @@ class BrowserJSMixin:
             refs.contextUsageDetailButton.addEventListener("click", (event) => {
                 event.stopPropagation();
                 void openUsageDetailDialog();
+            });
+        }
+        if (refs.contextTierWarningClose) {
+            refs.contextTierWarningClose.addEventListener("click", (event) => {
+                event.stopPropagation();
+                dismissContextTierWarning();
             });
         }
         if (refs.usageDetailClose) refs.usageDetailClose.addEventListener("click", closeUsageDetailDialog);
@@ -307,10 +331,20 @@ class BrowserJSMixin:
         if (!Array.isArray(messages)) return [];
         return messages.reduce((result, item) => {
             const role = String(item?.role || "").trim();
+            const sourceRole = String(item?.source_role || item?.sourceRole || role).trim();
+            if (role === "tool" || sourceRole === "tool") {
+                result.push({
+                    role: "assistant",
+                    content: String(item?.content || ""),
+                    sourceRole: "tool",
+                });
+                return result;
+            }
             if (!["system", "assistant", "user"].includes(role)) return result;
             result.push({
                 role,
                 content: String(item?.content || ""),
+                sourceRole,
             });
             return result;
         }, []);
@@ -326,8 +360,27 @@ class BrowserJSMixin:
         ), 0);
     }
 
+    function estimateContextUsageBreakdown(messages = state.contextMessages, pendingInput = refs.input?.value || "") {
+        const inputTokens = estimateTextTokens(pendingInput);
+        return cloneContextMessages(messages).reduce((totals, message) => {
+            const messageTokens = estimateTextTokens(message.content || "");
+            const sourceRole = String(message.sourceRole || message.role || "").trim();
+            if (sourceRole === "tool") {
+                totals.toolTokens += messageTokens;
+            } else {
+                totals.chatTokens += messageTokens;
+            }
+            totals.totalTokens += messageTokens;
+            return totals;
+        }, {
+            toolTokens: 0,
+            chatTokens: inputTokens,
+            totalTokens: inputTokens,
+        });
+    }
+
     function getCurrentEstimatedContextTokens() {
-        return estimateContextMessagesTokens(state.contextMessages) + estimateTextTokens(refs.input?.value || "");
+        return estimateContextUsageBreakdown(state.contextMessages, refs.input?.value || "").totalTokens;
     }
 
     function setContextMessages(messages) {
@@ -358,22 +411,52 @@ class BrowserJSMixin:
         return `${compactKLabel} (<span class="usage-token-meta" tabindex="0"><span class="usage-token-meta-value">${millionLabel}</span><span class="usage-token-meta-tooltip">${tooltipLabel}</span></span>)`;
     }
 
+    function formatUsageShareLabel(value, total) {
+        const denominator = coerceTokenValue(total);
+        if (denominator <= 0) return "0.0%";
+        return `${((coerceTokenValue(value) / denominator) * 100).toFixed(1)}%`;
+    }
+
+    function dismissContextTierWarning() {
+        state.contextTierWarningDismissed = true;
+        updateContextTierWarningVisibility(getCurrentEstimatedContextTokens());
+    }
+
+    function updateContextTierWarningVisibility(totalTokens) {
+        if (!refs.contextTierWarning || !refs.contextMeterShell) return;
+        const shouldWarn = coerceTokenValue(totalTokens) > CONTEXT_TIER_WARNING_THRESHOLD;
+        if (!shouldWarn) state.contextTierWarningDismissed = false;
+        const isVisible = shouldWarn && !state.contextTierWarningDismissed;
+        refs.contextTierWarning.hidden = !isVisible;
+        refs.contextTierWarning.setAttribute("aria-hidden", isVisible ? "false" : "true");
+        refs.contextMeterShell.classList.toggle("has-tier-warning-visible", isVisible);
+    }
+
     function renderContextUsage() {
         if (!refs.contextMeter || !refs.contextMeterValue || !refs.contextMeterStatus) return;
-        const totalTokens = getCurrentEstimatedContextTokens();
+        const usageBreakdown = estimateContextUsageBreakdown(state.contextMessages, refs.input?.value || "");
+        const totalTokens = usageBreakdown.totalTokens;
         const progress = Math.max(0, Math.min(1, totalTokens / state.contextLimitTokens));
         const isOverLimit = totalTokens > state.contextLimitTokens;
+        const isTierWarning = totalTokens > CONTEXT_TIER_WARNING_THRESHOLD;
         const totalConversationTokens = coerceTokenValue(state.totalConversationTokens);
         const contextLabel = `${formatContextTokenLabel(totalTokens)} / ${formatContextTokenLabel(state.contextLimitTokens)}`;
         const totalConversationLabel = formatContextTokenLabel(totalConversationTokens);
+        const toolShareLabel = formatUsageShareLabel(usageBreakdown.toolTokens, totalTokens);
+        const chatShareLabel = formatUsageShareLabel(usageBreakdown.chatTokens, totalTokens);
         refs.contextMeter.style.setProperty("--context-progress", `${progress}`);
+        refs.contextMeter.classList.toggle("is-tier-warning", isTierWarning);
         refs.contextMeter.classList.toggle("is-over-limit", isOverLimit);
         refs.contextMeterValue.textContent = contextLabel;
         if (refs.contextMeterWindow) refs.contextMeterWindow.textContent = `上下文窗口：${contextLabel}`;
         if (refs.contextMeterTotal) refs.contextMeterTotal.textContent = `总对话 Token：${totalConversationLabel}`;
+        if (refs.contextMeterToolShare) refs.contextMeterToolShare.textContent = `工具占用：${toolShareLabel}`;
+        if (refs.contextMeterChatShare) refs.contextMeterChatShare.textContent = `聊天占用：${chatShareLabel}`;
+        if (refs.contextTierWarningText) refs.contextTierWarningText.textContent = `当前上下文窗口已达到 ${formatContextTokenLabel(totalTokens)}，超过 32k 后，部分模型可能进入更高档位收费。`;
         refs.contextMeterStatus.hidden = !isOverLimit;
         refs.contextMeterStatus.textContent = `已超过 ${formatContextTokenLabel(state.contextLimitTokens)}`;
-        refs.contextMeter.setAttribute("aria-label", `上下文窗口用量估算 ${formatContextTokenLabel(totalTokens)} / ${formatContextTokenLabel(state.contextLimitTokens)}${isOverLimit ? "，已超过上限" : ""}`);
+        updateContextTierWarningVisibility(totalTokens);
+        refs.contextMeter.setAttribute("aria-label", `上下文窗口用量估算 ${formatContextTokenLabel(totalTokens)} / ${formatContextTokenLabel(state.contextLimitTokens)}${isTierWarning ? "，已达到 32k 阶梯提醒" : ""}${isOverLimit ? "，已超过上限" : ""}`);
     }
 
     async function openUsageDetailDialog() {
@@ -382,8 +465,8 @@ class BrowserJSMixin:
 
         refs.usageDetailOverlay.hidden = false;
         refs.usageDetailOverlay.setAttribute("aria-hidden", "false");
-        refs.usageDetailSummary.textContent = "正在计算详细统计...";
-        refs.usageDetailBody.innerHTML = '<div class="usage-detail-empty">加载中...</div>';
+        refs.usageDetailSummary.textContent = "等待流结束后进行计算...";
+        refs.usageDetailBody.innerHTML = '<div class="usage-detail-empty">等待中...</div>';
 
         try {
             const response = await fetch("/api/session/token-usage", {
@@ -933,6 +1016,9 @@ class BrowserJSMixin:
             setContextMessages(payload.context_messages || []);
             setTotalConversationTokens(payload.total_tokens || 0);
             setLatestAssistantThinking(payload.latest_assistant_thinking || "");
+            if (typeof payload.saved_basename === "string") {
+                setCurrentSavedBasename(payload.saved_basename, { refreshRecords: false });
+            }
             annotateTurnEpochs();
             enhanceConversationActions();
             closeRecordsPanel();
@@ -978,6 +1064,9 @@ class BrowserJSMixin:
             setContextMessages(payload.context_messages || []);
             setTotalConversationTokens(payload.total_tokens || 0);
             setLatestAssistantThinking(payload.latest_assistant_thinking || "");
+            if (typeof payload.saved_basename === "string") {
+                setCurrentSavedBasename(payload.saved_basename, { refreshRecords: false });
+            }
             annotateTurnEpochs();
             enhanceConversationActions();
             applyOutputPreferenceState(refs.conversation);
@@ -1626,6 +1715,9 @@ class BrowserJSMixin:
             setContextMessages(payload.context_messages || []);
             setTotalConversationTokens(payload.total_tokens || 0);
             setLatestAssistantThinking(payload.latest_assistant_thinking || "");
+            if (typeof payload.saved_basename === "string") {
+                setCurrentSavedBasename(payload.saved_basename, { refreshRecords: false });
+            }
             state.followStreaming = true;
             if (payload.selected_model && modelMap.has(payload.selected_model)) {
                 refs.modelButton.dataset.value = payload.selected_model;
@@ -1670,6 +1762,9 @@ class BrowserJSMixin:
             setContextMessages(payload.context_messages || []);
             setTotalConversationTokens(payload.total_tokens || 0);
             setLatestAssistantThinking(payload.latest_assistant_thinking || "");
+            if (typeof payload.saved_basename === "string") {
+                setCurrentSavedBasename(payload.saved_basename, { refreshRecords: false });
+            }
             state.followStreaming = true;
             if (payload.selected_model && modelMap.has(payload.selected_model)) {
                 refs.modelButton.dataset.value = payload.selected_model;
@@ -1896,7 +1991,11 @@ class BrowserJSMixin:
 
     function renderExtraField(field, value) {
         if (field.type === "boolean") {
-            return `<button class="extra-toggle${value ? " is-checked" : ""}" type="button" data-extra-key="${escapeAttr(field.key)}" data-extra-kind="boolean" aria-pressed="${value ? "true" : "false"}" title="${escapeAttr(field.label)}"><span class="extra-toggle-indicator" aria-hidden="true"></span><span class="extra-toggle-label">${escapeHtml(field.label)}</span></button>`;
+            const description = typeof field.description === "string" ? field.description.trim() : "";
+            const copyHtml = description
+                ? `<span class="extra-toggle-copy"><span class="extra-toggle-label">${escapeHtml(field.label)}</span><span class="extra-toggle-description">${escapeHtml(description)}</span></span>`
+                : `<span class="extra-toggle-label">${escapeHtml(field.label)}</span>`;
+            return `<button class="extra-toggle${value ? " is-checked" : ""}" type="button" data-extra-key="${escapeAttr(field.key)}" data-extra-kind="boolean" aria-pressed="${value ? "true" : "false"}" title="${escapeAttr(field.label)}"><span class="extra-toggle-indicator" aria-hidden="true"></span>${copyHtml}</button>`;
         }
         if (field.type === "select") {
             return `<div class="extra-field extra-field--choices"><label>${escapeHtml(field.label)}</label><div class="extra-choice-list">${field.options.map((option) => {
@@ -2123,6 +2222,29 @@ class BrowserJSMixin:
         renderAttachmentStrip();
     }
 
+    function detachPendingAttachments() {
+        const detached = state.attachments;
+        state.attachments = [];
+        state.dragDepth = 0;
+        refs.composerCard.classList.remove("is-drag-over");
+        refs.fileInput.value = "";
+        renderAttachmentStrip();
+        return detached;
+    }
+
+    function restorePendingAttachments(attachments) {
+        releaseAttachmentList(state.attachments);
+        state.attachments = Array.isArray(attachments) ? attachments : [];
+        state.dragDepth = 0;
+        refs.composerCard.classList.remove("is-drag-over");
+        refs.fileInput.value = "";
+        renderAttachmentStrip();
+    }
+
+    function releaseAttachmentList(attachments) {
+        for (const item of attachments || []) releaseAttachmentPreview(item);
+    }
+
     function releaseAttachmentPreview(item) {
         if (!item || !item.previewUrl) return;
         URL.revokeObjectURL(item.previewUrl);
@@ -2205,15 +2327,56 @@ class BrowserJSMixin:
         }
     }
 
+    function updateSendButtonState() {
+        if (!refs.sendButton) return;
+        refs.sendButton.classList.toggle("is-streaming", state.isStreaming);
+        refs.sendButton.classList.toggle("is-stop-blocked", state.isStreaming && state.streamStopBlocked);
+        refs.sendButton.disabled = false;
+        if (state.isStreaming) {
+            const blocked = state.streamStopBlocked;
+            refs.sendButton.setAttribute("aria-disabled", blocked ? "true" : "false");
+            refs.sendButton.setAttribute("aria-label", blocked ? "工具调用中，暂不能停止" : "停止流式输出");
+            refs.sendButton.title = blocked ? "工具调用中，暂不能停止" : "停止流式输出";
+            return;
+        }
+        refs.sendButton.removeAttribute("aria-disabled");
+        refs.sendButton.setAttribute("aria-label", "发送消息");
+        refs.sendButton.title = "发送消息";
+    }
+
+    function setStreamStopBlocked(blocked) {
+        const nextBlocked = !!blocked;
+        if (state.streamStopBlocked === nextBlocked) return;
+        state.streamStopBlocked = nextBlocked;
+        updateSendButtonState();
+    }
+
+    function stopStreaming() {
+        if (!state.isStreaming) return;
+        if (state.streamStopBlocked) {
+            showToast("工具调用中，暂不能停止流式输出。", "info");
+            return;
+        }
+        if (!state.streamAbortController) return;
+        state.stopStreamRequested = true;
+        state.streamAbortController.abort();
+    }
+
     async function sendMessage() {
         if (state.isStreaming || !state.sessionId) return;
         const text = refs.input.value;
         if (!text.trim() && state.attachments.length === 0) return;
 
         const previousContextMessages = cloneContextMessages();
+        const previousTitle = state.currentTitle;
+        const previousSavedBasename = state.currentSavedBasename;
+        const controller = new AbortController();
+        state.streamAbortController = controller;
+        state.stopStreamRequested = false;
+        state.streamStopBlocked = false;
         state.isStreaming = true;
         state.followStreaming = isAtPageBottom();
-        refs.sendButton.disabled = true;
+        updateSendButtonState();
         closeAllMenus();
         closeRecordActionMenu();
 
@@ -2232,12 +2395,12 @@ class BrowserJSMixin:
         for (const item of state.attachments) formData.append("attachments", item.file, item.file.name);
 
         refs.input.value = "";
-        clearPendingAttachments();
+        let detachedAttachments = detachPendingAttachments();
         syncTextareaHeight();
         setContextMessages([...previousContextMessages, { role: "user", content: text }]);
 
         try {
-            const response = await fetch("/api/chat", { method: "POST", body: formData });
+            const response = await fetch("/api/chat", { method: "POST", body: formData, signal: controller.signal });
             if (!response.ok || !response.body) throw new Error("请求失败");
 
             const reader = response.body.getReader();
@@ -2257,10 +2420,26 @@ class BrowserJSMixin:
             if (buffer.trim()) handleStreamEvent(turn, JSON.parse(buffer));
         } catch (error) {
             setContextMessages(previousContextMessages);
+            if (state.stopStreamRequested && error?.name === "AbortError") {
+                turn.remove();
+                refs.input.value = text;
+                restorePendingAttachments(detachedAttachments);
+                detachedAttachments = [];
+                setConversationTitle(previousTitle, { refreshRecords: false });
+                setCurrentSavedBasename(previousSavedBasename, { refreshRecords: false });
+                syncTextareaHeight();
+                renderContextUsage();
+                showToast("已停止本轮输出，输入已回填。", "info");
+            } else {
             turn.showError(error.message || "请求失败");
+            }
         } finally {
+            releaseAttachmentList(detachedAttachments);
             state.isStreaming = false;
-            refs.sendButton.disabled = false;
+            state.streamAbortController = null;
+            state.stopStreamRequested = false;
+            state.streamStopBlocked = false;
+            updateSendButtonState();
             refs.input.focus();
         }
     }
@@ -2278,7 +2457,7 @@ class BrowserJSMixin:
         userRow.appendChild(userBubble);
         const assistantBlock = document.createElement("div");
         assistantBlock.className = "assistant-block";
-        assistantBlock.innerHTML = '<div class="assistant-response-row"><div class="assistant-status-indicator is-loading" aria-label="模型处理中"><span class="assistant-status-spinner" aria-hidden="true"></span><span class="assistant-status-check" aria-hidden="true"></span></div><div class="assistant-response-main"><div class="assistant-answer"><div class="stream-render-surface"><div class="message-content stream-render-target"></div></div></div></div></div>';
+        assistantBlock.innerHTML = '<div class="assistant-response-row"><div class="assistant-status-indicator is-loading" aria-label="模型处理中"><span class="assistant-status-spinner" aria-hidden="true"></span><span class="assistant-status-check" aria-hidden="true"></span></div><div class="assistant-response-main"></div></div>';
         article.appendChild(userRow);
         article.appendChild(assistantBlock);
         refs.conversation.appendChild(article);
@@ -2288,25 +2467,18 @@ class BrowserJSMixin:
 
         const statusIndicator = assistantBlock.querySelector(".assistant-status-indicator");
         const responseMain = assistantBlock.querySelector(".assistant-response-main");
-        const answerNode = responseMain.querySelector(".assistant-answer");
-        const answerTextEl = responseMain.querySelector(".message-content");
-        const answerRenderer = createStreamingMarkdownRenderer(answerTextEl);
-        let liveActivityHost = null;
-        let liveMeta = null;
-        let liveMetaSummaryLabel = null;
-        let liveMetaBody = null;
-        let liveMetaRenderer = null;
+        const streamSequence = document.createElement("div");
+        streamSequence.className = "assistant-stream-sequence";
+        responseMain.appendChild(streamSequence);
+        let activeAnswerRenderer = null;
+        let activeThinkingRenderer = null;
+        let activeThinkingSummaryLabel = null;
+        let activeProcessHost = null;
+        let activeKind = "";
         let liveThinkingStartedAt = 0;
         let liveThinkingElapsedMs = 0;
         let liveThinkingTimerId = 0;
         let statusDoneTimerId = 0;
-
-        function ensureLiveActivityHost() {
-            if (liveActivityHost) return;
-            liveActivityHost = document.createElement("div");
-            liveActivityHost.className = "live-activity-host";
-            responseMain.insertBefore(liveActivityHost, answerNode);
-        }
 
         function formatThinkingDuration(elapsedMs) {
             return `${(Math.max(0, elapsedMs) / 1000).toFixed(1)}s`;
@@ -2317,15 +2489,15 @@ class BrowserJSMixin:
             return liveThinkingElapsedMs + (performance.now() - liveThinkingStartedAt);
         }
 
-        function setLiveMetaSummary(text) {
-            if (!liveMetaSummaryLabel) return;
-            liveMetaSummaryLabel.textContent = text;
+        function setLiveThinkingSummary(text) {
+            if (!activeThinkingSummaryLabel) return;
+            activeThinkingSummaryLabel.textContent = text;
         }
 
         function refreshLiveThinkingSummary() {
             const elapsedMs = getLiveThinkingElapsedMs();
             if (!(elapsedMs > 0)) return;
-            setLiveMetaSummary(`\u601d\u8003\u4e2d ${formatThinkingDuration(elapsedMs)}`);
+            setLiveThinkingSummary(`\u601d\u8003\u4e2d ${formatThinkingDuration(elapsedMs)}`);
         }
 
         function startLiveThinkingTimer() {
@@ -2347,32 +2519,63 @@ class BrowserJSMixin:
                 liveThinkingTimerId = 0;
             }
             if (liveThinkingElapsedMs > 0) {
-                setLiveMetaSummary(`\u5df2\u601d\u8003 ${formatThinkingDuration(liveThinkingElapsedMs)}`);
+                setLiveThinkingSummary(`\u5df2\u601d\u8003 ${formatThinkingDuration(liveThinkingElapsedMs)}`);
             }
         }
 
-        function applyThinkingDurationToFinalMeta() {
-            if (!(liveThinkingElapsedMs > 0)) return;
-            const summaryLabel = assistantBlock.querySelector("details.assistant-thinking-box .summary-label");
-            if (!summaryLabel) return;
-            const currentText = (summaryLabel.textContent || "").trim();
-            const cleanedText = currentText.replace(/\s*\u5df2\u601d\u8003\s*[0-9.]+s$/, "").trim();
-            const baseText = cleanedText === "\u67e5\u770b\u601d\u8003\u4e0e\u5143\u6570\u636e" ? "" : cleanedText;
-            summaryLabel.textContent = `${baseText ? `${baseText} ` : ""}\u5df2\u601d\u8003 ${formatThinkingDuration(liveThinkingElapsedMs)}`;
+        function resetThinkingTimer() {
+            liveThinkingStartedAt = 0;
+            liveThinkingElapsedMs = 0;
+            if (liveThinkingTimerId) {
+                window.clearInterval(liveThinkingTimerId);
+                liveThinkingTimerId = 0;
+            }
         }
 
-        function ensureLiveMeta(summaryText) {
-            if (!liveMeta) {
-                liveMeta = document.createElement("details");
-                liveMeta.className = "meta-box assistant-meta-box assistant-thinking-box live-log";
-                liveMeta.open = !state.browserPreferences.collapse_thinking_by_default;
-                liveMeta.innerHTML = `<summary><div class="summary-row"><span class="summary-label">${escapeHtml(summaryText || "")}</span><span class="summary-caret" aria-hidden="true"></span></div></summary><div class="meta-content"><div class="stream-render-surface"><div class="message-content stream-render-target"></div></div></div>`;
-                responseMain.insertBefore(liveMeta, answerNode);
-                liveMetaSummaryLabel = liveMeta.querySelector(".summary-label");
-                liveMetaBody = liveMeta.querySelector(".message-content");
-                liveMetaRenderer = createStreamingMarkdownRenderer(liveMetaBody);
+        function setActiveKind(nextKind) {
+            if (activeKind === "thinking" && nextKind !== "thinking") stopLiveThinkingTimer();
+            if (nextKind !== "answer") activeAnswerRenderer = null;
+            if (nextKind !== "thinking") {
+                activeThinkingRenderer = null;
+                activeThinkingSummaryLabel = null;
+                resetThinkingTimer();
             }
-            if (summaryText) setLiveMetaSummary(summaryText);
+            if (nextKind !== "process") activeProcessHost = null;
+            activeKind = nextKind;
+        }
+
+        function ensureAnswerRenderer() {
+            if (activeKind === "answer" && activeAnswerRenderer) return activeAnswerRenderer;
+            setActiveKind("answer");
+            const answerNode = document.createElement("div");
+            answerNode.className = "assistant-answer";
+            answerNode.innerHTML = '<div class="stream-render-surface"><div class="message-content stream-render-target"></div></div>';
+            streamSequence.appendChild(answerNode);
+            activeAnswerRenderer = createStreamingMarkdownRenderer(answerNode.querySelector(".message-content"));
+            return activeAnswerRenderer;
+        }
+
+        function ensureThinkingRenderer() {
+            if (activeKind === "thinking" && activeThinkingRenderer) return activeThinkingRenderer;
+            setActiveKind("thinking");
+            const thinkingNode = document.createElement("details");
+            thinkingNode.className = "meta-box assistant-meta-box assistant-thinking-box live-log";
+            thinkingNode.open = !state.browserPreferences.collapse_thinking_by_default;
+            thinkingNode.innerHTML = `<summary><div class="summary-row"><span class="summary-label">\u601d\u8003\u4e2d</span><span class="summary-caret" aria-hidden="true"></span></div></summary><div class="meta-content"><div class="stream-render-surface"><div class="message-content stream-render-target"></div></div></div>`;
+            streamSequence.appendChild(thinkingNode);
+            activeThinkingSummaryLabel = thinkingNode.querySelector(".summary-label");
+            activeThinkingRenderer = createStreamingMarkdownRenderer(thinkingNode.querySelector(".message-content"));
+            resetThinkingTimer();
+            return activeThinkingRenderer;
+        }
+
+        function ensureProcessHost() {
+            if (activeKind === "process" && activeProcessHost) return activeProcessHost;
+            setActiveKind("process");
+            activeProcessHost = document.createElement("div");
+            activeProcessHost.className = "live-activity-host";
+            streamSequence.appendChild(activeProcessHost);
+            return activeProcessHost;
         }
 
         function clearStatusDoneTimer() {
@@ -2405,12 +2608,21 @@ class BrowserJSMixin:
         }
 
         return {
+            remove() {
+                stopLiveThinkingTimer();
+                clearStatusDoneTimer();
+                if (article.isConnected) article.remove();
+                annotateTurnEpochs();
+                enhanceConversationActions();
+                refreshTurnNavigator();
+                syncScrollBottomButtonVisibility();
+            },
             updateLiveActivity(html) {
-                ensureLiveActivityHost();
-                liveActivityHost.innerHTML = html || "";
-                liveActivityHost.hidden = !html;
-                applyOutputPreferenceState(liveActivityHost);
-                if (!answerRenderer.hasContent()) scrollConversationToBottom();
+                const host = ensureProcessHost();
+                host.innerHTML = html || "";
+                host.hidden = !html;
+                applyOutputPreferenceState(host);
+                scrollConversationToBottom();
             },
             appendWarning(text) {
                 const node = document.createElement("div");
@@ -2420,23 +2632,25 @@ class BrowserJSMixin:
                 scrollConversationToBottom();
             },
             appendAnswer(text) {
-                if (text && liveThinkingStartedAt) stopLiveThinkingTimer();
-                answerRenderer.append(text);
+                if (!text) return;
+                const renderer = ensureAnswerRenderer();
+                renderer.append(text);
                 scrollConversationToBottom();
             },
             appendThinking(text) {
-                ensureLiveMeta("\u601d\u8003\u4e2d");
+                if (!text) return;
+                const renderer = ensureThinkingRenderer();
                 startLiveThinkingTimer();
-                liveMetaRenderer.append(text);
+                renderer.append(text);
                 scrollConversationToBottom();
             },
             appendSystem(text) {
-                if (!answerRenderer.hasContent()) scrollConversationToBottom();
+                if (text) scrollConversationToBottom();
             },
             finalize(event) {
                 stopLiveThinkingTimer();
                 userBubble.innerHTML = event.user_html || userBubble.innerHTML;
-                responseMain.innerHTML = `${event.assistant_meta_html || ""}<div class="assistant-answer">${event.assistant_answer_html || '<div class="message-content"></div>'}</div>`;
+                responseMain.innerHTML = event.assistant_blocks_html || '<div class="assistant-answer"><div class="message-content"></div></div>';
                 renderMathInContent(article);
                 if (typeof event.assistant_answer_text === "string") {
                     article.dataset.assistantRaw = event.assistant_answer_text;
@@ -2454,7 +2668,6 @@ class BrowserJSMixin:
                 if (typeof event.latest_assistant_thinking === "string") {
                     setLatestAssistantThinking(event.latest_assistant_thinking);
                 }
-                applyThinkingDurationToFinalMeta();
                 applyOutputPreferenceState(article, { forceCollapse: state.browserPreferences.auto_collapse_output_meta });
                 markStatusCompleted();
                 enhanceConversationActions();
@@ -2477,6 +2690,7 @@ class BrowserJSMixin:
     }
 
     function handleStreamEvent(turn, event) {
+        if ("tool_call_active" in event) setStreamStopBlocked(!!event.tool_call_active);
         if ("assistant_live_meta_html" in event) turn.updateLiveActivity(event.assistant_live_meta_html || "");
         if (event.type === "title" && event.title) {
             setConversationTitle(event.title);
@@ -2945,6 +3159,15 @@ class BrowserJSMixin:
                 }
             }
 
+            if (isMarkdownThematicBreak(stripped)) {
+                flushParagraph();
+                flushList();
+                flushBlockquote();
+                htmlParts.push("<hr>");
+                index += 1;
+                continue;
+            }
+
             const headingMatch = stripped.match(/^(#{1,4})\s+(.*)$/);
             if (headingMatch) {
                 flushParagraph();
@@ -3006,6 +3229,11 @@ class BrowserJSMixin:
     function isMarkdownTableRow(line) {
         const row = String(line ?? "").trim();
         return row.includes("|") && !row.startsWith("#") && !row.startsWith("&gt;");
+    }
+
+    function isMarkdownThematicBreak(line) {
+        const stripped = String(line ?? "").trim();
+        return /^([-*_])(?:\s*\1){2,}$/.test(stripped);
     }
 
     function looksLikeMarkdownTable(headerLine, separatorLine) {

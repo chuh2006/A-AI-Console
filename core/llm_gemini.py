@@ -1,21 +1,75 @@
 import time
+import json
 from google import genai
 from typing import Generator, Dict, Any, List
 from .llm_base import BaseLLMClient
 
 class GeminiClient(BaseLLMClient):
+    def _stringify_content(self, content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(content)
+
+    def _format_tool_calls(self, message: Dict[str, Any]) -> str:
+        raw_tool_calls = message.get("tool_calls", [])
+        if not isinstance(raw_tool_calls, list):
+            return ""
+
+        summaries: list[str] = []
+        for tool_call in raw_tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function_info = tool_call.get("function", {})
+            if not isinstance(function_info, dict):
+                function_info = {}
+            name = str(function_info.get("name") or tool_call.get("name") or "").strip()
+            arguments = self._stringify_content(function_info.get("arguments", ""))
+            call_id = str(tool_call.get("id", "") or "").strip()
+            if not name and not call_id:
+                continue
+            label = name or "tool"
+            suffix = f" id={call_id}" if call_id else ""
+            summaries.append(f"[Tool call: {label}{suffix} arguments={arguments}]")
+        return "\n".join(summaries)
+
+    def _format_tool_result(self, message: Dict[str, Any]) -> str:
+        call_id = str(message.get("tool_call_id", "") or "").strip()
+        label = f"[Tool result id={call_id}]" if call_id else "[Tool result]"
+        return f"{label}\n{self._stringify_content(message.get('content', ''))}"
+
     def _convert_history(self, messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         """将 OpenAI 格式历史转换为 Gemini 格式"""
         gemini_history = []
         for msg in messages:
-            if msg["role"] == "system":
+            if not isinstance(msg, dict):
+                continue
+
+            role_value = str(msg.get("role", "")).strip()
+            if role_value == "system":
                 # System prompt 会在后面通过特定方式或合并到第一条消息中处理，
                 # 但根据你原来的 openai_to_gemini 逻辑，直接跳过了 system，这里保持一致
-                sys_prompt = msg["content"]
                 continue
             
-            role = "user" if msg["role"] == "user" else "model"
-            gemini_history.append({"role": role, "parts": [{"text": str(msg['content'])}]})
+            if role_value == "tool":
+                gemini_history.append({"role": "user", "parts": [{"text": self._format_tool_result(msg)}]})
+                continue
+
+            if role_value not in {"user", "assistant"}:
+                continue
+
+            role = "user" if role_value == "user" else "model"
+            text = self._stringify_content(msg.get("content", ""))
+            if role_value == "assistant":
+                tool_summary = self._format_tool_calls(msg)
+                if tool_summary:
+                    text = f"{text}\n\n{tool_summary}".strip()
+            if text or role == "user":
+                gemini_history.append({"role": role, "parts": [{"text": text}]})
         return gemini_history
 
     def chat_stream(self, messages: List[Dict[str, Any]], temperature: float, image_paths: List[str] = None, **kwargs) -> Generator[Dict[str, Any], None, None]:

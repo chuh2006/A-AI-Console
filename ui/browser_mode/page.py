@@ -107,15 +107,22 @@ class BrowserIndexPageMixin:
                                 <span class="context-meter-ring-core"></span>
                             </span>
                         </button>
+                        <div class="context-tier-warning" id="context-tier-warning" aria-live="polite" aria-hidden="true" hidden>
+                            <button class="context-tier-warning-close" type="button" id="context-tier-warning-close" aria-label="关闭 32k 提醒">&times;</button>
+                            <span class="context-tier-warning-title">32k 阶梯提醒</span>
+                            <span class="context-tier-warning-text" id="context-tier-warning-text">当前上下文窗口已达到 32k，部分模型可能进入更高档位收费。</span>
+                        </div>
                         <div class="context-meter-popover" aria-hidden="true">
                             <span class="context-meter-value" id="context-meter-value">0.0k / 100.0k</span>
                             <span class="context-meter-detail" id="context-meter-window">上下文窗口：0.0k / 100.0k</span>
                             <span class="context-meter-detail" id="context-meter-total">总对话 Token：0</span>
+                            <span class="context-meter-detail" id="context-meter-tool-share">工具占用：0.0%</span>
+                            <span class="context-meter-detail" id="context-meter-chat-share">聊天占用：0.0%</span>
                             <button class="context-meter-detail-button" type="button" id="context-usage-detail-button">详细用量统计</button>
                             <span class="context-meter-status" id="context-meter-status" hidden>已超过上限</span>
                         </div>
                     </div>
-                    <button class="send-button" type="button" id="send-button">发送</button>
+                    <button class="send-button" type="button" id="send-button" aria-label="发送消息"></button>
                 </div>
             </div>
         </section>

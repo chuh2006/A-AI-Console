@@ -24,8 +24,8 @@ from core.llm_factory import LLMFactory
 from core.session import ChatSession
 from tools.chat_archive_renderer import (
     _build_render_structure,
+    _render_assistant_blocks,
     _render_markdown_block,
-    _render_system_panel,
     _render_turn,
 )
 from tools.documents_reader import DocumentParser, UnsupportedFileFormatError
@@ -299,7 +299,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         for message in messages:
             if not isinstance(message, dict):
                 continue
-            if str(message.get("role", "")).strip() not in {"system", "assistant", "user"}:
+            if str(message.get("role", "")).strip() not in {"system", "assistant", "user", "tool"}:
                 continue
             total += self._estimate_text_tokens(message.get("content", ""))
         if pending_user_text:
@@ -324,6 +324,15 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             if not isinstance(message, dict):
                 continue
             role = str(message.get("role", "")).strip()
+            if role == "tool":
+                serialized.append(
+                    {
+                        "role": "assistant",
+                        "content": str(message.get("content", "") or ""),
+                        "source_role": "tool",
+                    }
+                )
+                continue
             if role not in {"system", "assistant", "user"}:
                 continue
             serialized.append(
@@ -351,20 +360,32 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         basename = re.sub(r'[\\/*?:"<>|]', "", basename)
         return basename.strip()
 
-    def _list_record_file_paths(self, basename: str) -> list[str]:
+    def _iter_record_storage_dirs(self, *, include_simple: bool = True) -> list[tuple[str, str]]:
         records_dir = os.path.join(self.project_root, "chat_result")
-        if not basename or not os.path.isdir(records_dir):
+        storage_dirs = [
+            ("root", records_dir),
+            ("json", os.path.join(records_dir, "json")),
+        ]
+        if include_simple:
+            storage_dirs.append(("json-simple", os.path.join(records_dir, "json-simple")))
+        return storage_dirs
+
+    def _list_record_file_paths(self, basename: str) -> list[str]:
+        if not basename:
             return []
 
-        allowed_suffixes = {".json", ".html", ".md"}
         matched_paths: list[str] = []
-        for item in os.scandir(records_dir):
-            if not item.is_file():
+        for storage_name, storage_dir in self._iter_record_storage_dirs(include_simple=True):
+            if not os.path.isdir(storage_dir):
                 continue
-            item_basename, suffix = os.path.splitext(item.name)
-            if item_basename != basename or suffix.lower() not in allowed_suffixes:
-                continue
-            matched_paths.append(item.path)
+            allowed_suffixes = {".json"} if storage_name != "root" else {".json", ".html", ".md"}
+            for item in os.scandir(storage_dir):
+                if not item.is_file():
+                    continue
+                item_basename, suffix = os.path.splitext(item.name)
+                if item_basename != basename or suffix.lower() not in allowed_suffixes:
+                    continue
+                matched_paths.append(item.path)
         return sorted(matched_paths)
 
     def _build_unique_record_target(self, directory: str, filename: str) -> str:
@@ -375,6 +396,44 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             candidate = os.path.join(directory, f"{stem}({counter}){suffix}")
             counter += 1
         return candidate
+
+    def _split_record_basename_counter(self, basename: str) -> tuple[str, int]:
+        normalized = self._normalize_record_basename(basename)
+        if not normalized:
+            return "", 0
+
+        match = re.match(r"^(.*?)(?:\((\d+)\))?$", normalized)
+        if not match:
+            return normalized, 0
+
+        root = match.group(1).strip() or normalized
+        counter = int(match.group(2) or 0)
+        return root, counter
+
+    def _build_fork_saved_basename(self, current_basename: str, title_hint: str) -> str:
+        seed_basename = (
+            self._normalize_record_basename(current_basename)
+            or self._normalize_record_basename(title_hint)
+            or "chat"
+        )
+        root, current_counter = self._split_record_basename_counter(seed_basename)
+        root = root or seed_basename
+        highest_counter = current_counter
+        for storage_name, storage_dir in self._iter_record_storage_dirs(include_simple=True):
+            if not os.path.isdir(storage_dir):
+                continue
+            allowed_suffixes = {".json"} if storage_name != "root" else {".json", ".html", ".md"}
+            for item in os.scandir(storage_dir):
+                if not item.is_file():
+                    continue
+                item_basename, suffix = os.path.splitext(item.name)
+                if suffix.lower() not in allowed_suffixes:
+                    continue
+                item_root, item_counter = self._split_record_basename_counter(item_basename)
+                if item_root == root:
+                    highest_counter = max(highest_counter, item_counter)
+
+        return f"{root}({highest_counter + 1})"
 
     def _clear_saved_basename_refs(self, basename: str) -> None:
         with self.sessions_lock:
@@ -487,6 +546,9 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             save_html=not force_json_only and bool(self.browser_preferences.get("localized_save", True)),
             overwrite=bool(state.saved_basename),
             basename=state.saved_basename or None,
+            json_subdir="json",
+            save_simple_json=True,
+            simple_json_subdir="json-simple",
         )
         state.saved_basename = os.path.splitext(os.path.basename(saved_path))[0]
         return {
@@ -645,6 +707,67 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 },
             )
 
+    def _handle_fork_request(self, handler: BaseHTTPRequestHandler, session_id: str, fork_epoch: Any) -> None:
+        if not session_id:
+            self._send_json(handler, {"error": "缺少 session_id"}, status=400)
+            return
+
+        try:
+            target_epoch = int(fork_epoch)
+        except (TypeError, ValueError):
+            self._send_json(handler, {"error": "fork_epoch 必须是整数。"}, status=400)
+            return
+
+        try:
+            state = self._get_session_state(session_id)
+        except KeyError as exc:
+            self._send_json(handler, {"error": str(exc)}, status=404)
+            return
+
+        with state.lock:
+            if state.epoch <= 1:
+                self._send_json(handler, {"error": "当前会话轮次不足，无法 fork。"}, status=400)
+                return
+            if target_epoch < 1 or target_epoch >= state.epoch:
+                self._send_json(
+                    handler,
+                    {"error": f"无效的轮次。请输入一个介于 1 和 {state.epoch - 1} 之间的整数。"},
+                    status=400,
+                )
+                return
+
+            try:
+                self._save_browser_session_snapshot(state, force_json_only=False)
+            except Exception as exc:
+                self._send_json(handler, {"error": f"fork 前保存会话失败：{exc}"}, status=500)
+                return
+
+            next_saved_basename = self._build_fork_saved_basename(
+                state.saved_basename,
+                state.title or "新对话",
+            )
+            state.session.fork_to(target_epoch)
+            state.epoch = target_epoch
+            state.saved_basename = next_saved_basename
+            restored_model = self._extract_loaded_model(state.session.full_context)
+            if restored_model:
+                state.selected_model = restored_model
+
+            self._send_json(
+                handler,
+                {
+                    "title": state.title or "新对话",
+                    "conversation_html": self._render_loaded_conversation(state.session.full_context),
+                    "selected_model": state.selected_model,
+                    "epoch": state.epoch,
+                    "context_tokens": self._estimate_context_tokens(state.session.get_history()),
+                    "context_messages": self._serialize_context_messages(state.session.get_history()),
+                    "total_tokens": self._estimate_total_tokens(state.session),
+                    "latest_assistant_thinking": self._extract_latest_assistant_thinking(state.session.full_context),
+                    "saved_basename": state.saved_basename,
+                },
+            )
+
     def _handle_token_usage_request(self, handler: BaseHTTPRequestHandler, session_id: str) -> None:
         if not session_id:
             self._send_json(handler, {"error": "缺少 session_id"}, status=400)
@@ -687,10 +810,14 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                     bucket["output_tokens"] += self._estimate_text_tokens(content)
                 continue
 
-            if role == "assistant_answer":
+            if role in {"assistant_answer", "assistant_tool_calls"}:
                 if active_model:
                     bucket = model_totals.setdefault(active_model, {"input_tokens": 0, "output_tokens": 0})
                     bucket["output_tokens"] += self._estimate_text_tokens(content)
+                conversation_input_context_tokens += self._estimate_text_tokens(content)
+                continue
+
+            if role == "tool":
                 conversation_input_context_tokens += self._estimate_text_tokens(content)
                 continue
 
@@ -736,66 +863,91 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         if not os.path.isdir(records_dir):
             return []
 
-        allowed_suffixes = {".json", ".html", ".md"}
         format_order = {"json": 0, "html": 1, "md": 2}
         grouped_entries: dict[str, dict[str, Any]] = {}
 
-        for item in os.scandir(records_dir):
-            if not item.is_file():
+        for storage_name, storage_dir in self._iter_record_storage_dirs(include_simple=False):
+            if not os.path.isdir(storage_dir):
                 continue
 
-            base_name, suffix = os.path.splitext(item.name)
-            suffix = suffix.lower()
-            if suffix not in allowed_suffixes:
-                continue
+            allowed_suffixes = {".json"} if storage_name != "root" else {".json", ".html", ".md"}
+            for item in os.scandir(storage_dir):
+                if not item.is_file():
+                    continue
 
-            try:
-                stat = item.stat()
-            except OSError:
-                continue
+                base_name, suffix = os.path.splitext(item.name)
+                suffix = suffix.lower()
+                if suffix not in allowed_suffixes:
+                    continue
 
-            modified_at = datetime.fromtimestamp(stat.st_mtime)
-            entry = grouped_entries.setdefault(
-                base_name,
-                {
-                    "title": base_name,
-                    "basename": base_name,
-                    "modified_at": modified_at.isoformat(timespec="seconds"),
-                    "modified_label": modified_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    "files": [],
-                    "_sort_ts": 0.0,
-                },
-            )
-            if stat.st_mtime >= float(entry["_sort_ts"]):
-                entry["modified_at"] = modified_at.isoformat(timespec="seconds")
-                entry["modified_label"] = modified_at.strftime("%Y-%m-%d %H:%M:%S")
-                entry["_sort_ts"] = float(stat.st_mtime)
+                try:
+                    stat = item.stat()
+                except OSError:
+                    continue
 
-            entry["files"].append(
-                {
-                    "type": suffix.lstrip("."),
-                    "label": suffix.lstrip(".").upper(),
+                modified_at = datetime.fromtimestamp(stat.st_mtime)
+                entry = grouped_entries.setdefault(
+                    base_name,
+                    {
+                        "title": base_name,
+                        "basename": base_name,
+                        "modified_at": modified_at.isoformat(timespec="seconds"),
+                        "modified_label": modified_at.strftime("%Y-%m-%d %H:%M:%S"),
+                        "files": [],
+                        "_file_map": {},
+                        "_sort_ts": 0.0,
+                    },
+                )
+                if stat.st_mtime >= float(entry["_sort_ts"]):
+                    entry["modified_at"] = modified_at.isoformat(timespec="seconds")
+                    entry["modified_label"] = modified_at.strftime("%Y-%m-%d %H:%M:%S")
+                    entry["_sort_ts"] = float(stat.st_mtime)
+
+                file_type = suffix.lstrip(".")
+                file_info = {
+                    "type": file_type,
+                    "label": file_type.upper(),
                     "filename": item.name,
                     "url": self._browser_file_url(item.path),
+                    "_storage": storage_name,
+                    "_mtime": float(stat.st_mtime),
                 }
-            )
+                existing_file = entry["_file_map"].get(file_type)
+                should_replace = False
+                if not existing_file:
+                    should_replace = True
+                elif (
+                    file_type == "json"
+                    and storage_name == "json"
+                    and str(existing_file.get("_storage", "")) != "json"
+                ):
+                    should_replace = True
+                elif storage_name == str(existing_file.get("_storage", "")) and float(file_info["_mtime"]) >= float(existing_file.get("_mtime", 0.0)):
+                    should_replace = True
+
+                if should_replace:
+                    entry["_file_map"][file_type] = file_info
 
         entries = list(grouped_entries.values())
         for entry in entries:
-            files = entry.get("files", [])
-            if isinstance(files, list):
-                files.sort(key=lambda item: format_order.get(str(item.get("type", "")).lower(), 99))
-                entry["formats"] = [str(item.get("label", "")) for item in files if item.get("label")]
-                preferred_file = next(
-                    (item for item in files if str(item.get("type", "")).lower() == "json"),
-                    files[0] if files else None,
-                )
-                entry["load_filename"] = str(preferred_file.get("filename", "")) if preferred_file else ""
-                entry["search_text"] = " ".join(
-                    [str(entry.get("title", ""))]
-                    + [str(item.get("filename", "")) for item in files]
-                    + [str(item.get("type", "")) for item in files]
-                ).strip()
+            file_map = entry.pop("_file_map", {})
+            files = list(file_map.values()) if isinstance(file_map, dict) else []
+            for item in files:
+                item.pop("_storage", None)
+                item.pop("_mtime", None)
+            files.sort(key=lambda item: format_order.get(str(item.get("type", "")).lower(), 99))
+            entry["files"] = files
+            entry["formats"] = [str(item.get("label", "")) for item in files if item.get("label")]
+            preferred_file = next(
+                (item for item in files if str(item.get("type", "")).lower() == "json"),
+                files[0] if files else None,
+            )
+            entry["load_filename"] = str(preferred_file.get("filename", "")) if preferred_file else ""
+            entry["search_text"] = " ".join(
+                [str(entry.get("title", ""))]
+                + [str(item.get("filename", "")) for item in files]
+                + [str(item.get("type", "")) for item in files]
+            ).strip()
 
         entries.sort(key=lambda item: float(item.get("_sort_ts", 0.0)), reverse=True)
         trimmed = entries[: max(1, limit)] if limit > 0 else entries
@@ -805,9 +957,8 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
     def _render_loaded_conversation(self, full_context: list[dict[str, Any]]) -> str:
         structure = _build_render_structure(full_context)
-        system_html = _render_system_panel(structure.get("system_messages", []), structure.get("misc_messages", []))
         turns_html = "\n".join(_render_turn(turn) for turn in structure.get("turns", []))
-        return f"{system_html}{turns_html}"
+        return turns_html
 
     def _extract_loaded_epoch(self, full_context: list[dict[str, Any]]) -> int:
         epoch = 0
@@ -954,6 +1105,19 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         if not final_user_text.strip() and not image_paths:
             raise ValueError("消息内容为空。请输入文本，或者至少附带一个文件。")
 
+        previous_title = state.title
+        user_message_added = False
+
+        def rollback_pending_turn() -> None:
+            nonlocal user_message_added
+            if not user_message_added:
+                return
+            state.session.rollback_last_user_message()
+            if state.epoch > 0:
+                state.epoch -= 1
+            state.title = previous_title
+            user_message_added = False
+
         state.epoch += 1
         state.session.add_epoch_count(state.epoch)
 
@@ -975,18 +1139,20 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         )
         enabled_tools = ["web_search"] if extra_kwargs.get("enable_search") else []
 
-        state.session.add_enabled_tools(enabled_tools)
         state.session.add_user_message(
             content=final_user_text,
             original_text=original_text if original_text != final_user_text else None,
             images=image_paths or None,
         )
+        user_message_added = True
 
         assistant_text_parts: list[str] = []
-        thinking_parts: list[str] = []
+        assistant_blocks: list[dict[str, Any]] = []
         meta: dict[str, Any] = {}
-        live_system_messages: list[str] = []
-        live_tool_history: list[dict[str, Any]] = []
+        history_messages: list[dict[str, Any]] = []
+        seen_display_meta: dict[str, Any] = {}
+        current_live_tool_history: list[dict[str, Any]] = []
+        process_defaults_emitted = False
         answer_stream_started = False
         non_content_boundary_since_last_content = False
 
@@ -1001,6 +1167,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             for chunk in stream:
                 if not isinstance(chunk, dict):
                     continue
+                chunk = dict(chunk)
 
                 title_event = poll_title_event()
                 if title_event:
@@ -1008,9 +1175,12 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
                 chunk_type = chunk.get("type")
                 if chunk_type == "content":
-                    assistant_text_parts.append(chunk.get("content", ""))
+                    content_text = str(chunk.get("content", "") or "")
+                    assistant_text_parts.append(content_text)
+                    self._append_stream_text_block(assistant_blocks, "answer", content_text)
                     answer_stream_started = True
                     non_content_boundary_since_last_content = False
+                    current_live_tool_history = []
                 elif chunk_type == "thinking":
                     thinking_text = str(chunk.get("content", "") or "")
                     # 仅在“连续正文段”里纠偏 thinking -> content。
@@ -1022,64 +1192,115 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                         and thinking_text
                     ):
                         assistant_text_parts.append(thinking_text)
+                        self._append_stream_text_block(assistant_blocks, "answer", thinking_text)
                         chunk = dict(chunk)
                         chunk["type"] = "content"
                     else:
-                        thinking_parts.append(thinking_text)
+                        self._append_stream_text_block(assistant_blocks, "thinking", thinking_text)
+                        current_live_tool_history = []
                 elif chunk_type == "meta":
                     self._merge_meta(meta, chunk)
+                    if chunk.get("history_messages"):
+                        history_messages = [
+                            dict(item)
+                            for item in chunk.get("history_messages", [])
+                            if isinstance(item, dict)
+                        ]
                     non_content_boundary_since_last_content = True
-                    if chunk.get("tool_call_history"):
-                        live_tool_history = []
+                    meta_delta = self._extract_meta_delta(seen_display_meta, chunk)
+                    thinking_time = chunk.get("thinking_time")
+                    self._attach_thinking_supplements(
+                        assistant_blocks,
+                        meta_delta,
+                        thinking_time=thinking_time,
+                    )
+                    process_delta = {
+                        key: value
+                        for key, value in meta_delta.items()
+                        if key not in {"assistant_questions", "user_inputs", "history_messages"}
+                    }
+                    if process_delta:
+                        if enabled_tools and not process_defaults_emitted:
+                            process_delta = {"enabled_tools": list(enabled_tools), **process_delta}
+                            process_defaults_emitted = True
+                        process_block = self._append_process_block(assistant_blocks, process_delta)
+                        if process_block is not None:
+                            chunk = dict(chunk)
+                            chunk["assistant_live_meta_html"] = self._render_process_block_html(
+                                selected_model,
+                                process_block.get("content", {}),
+                            )
                 elif chunk_type == "meta_ocr":
                     non_content_boundary_since_last_content = True
-                    meta.setdefault("ocr_results", []).append(
-                        {
-                            "image_path": chunk.get("image_path", ""),
-                            "ocr_text": chunk.get("ocr_text", ""),
-                        }
-                    )
+                    ocr_item = {
+                        "image_path": chunk.get("image_path", ""),
+                        "ocr_text": chunk.get("ocr_text", ""),
+                    }
+                    meta.setdefault("ocr_results", []).append(ocr_item)
+                    process_delta = {"ocr_results": [ocr_item]}
+                    if enabled_tools and not process_defaults_emitted:
+                        process_delta = {"enabled_tools": list(enabled_tools), **process_delta}
+                        process_defaults_emitted = True
+                    process_block = self._append_process_block(assistant_blocks, process_delta)
+                    if process_block is not None:
+                        chunk = dict(chunk)
+                        chunk["assistant_live_meta_html"] = self._render_process_block_html(
+                            selected_model,
+                            process_block.get("content", {}),
+                        )
                 elif chunk_type == "system":
                     non_content_boundary_since_last_content = True
                     normalized_system = self._normalize_system_message(chunk.get("content", ""))
                     if normalized_system:
-                        live_system_messages.append(normalized_system)
-                        self._update_live_tool_history(live_tool_history, normalized_system)
+                        if not assistant_blocks or str(assistant_blocks[-1].get("kind", "")).strip() != "process":
+                            current_live_tool_history = []
+                        self._update_live_tool_history(current_live_tool_history, normalized_system)
                     chunk = dict(chunk)
                     chunk["content"] = normalized_system
-
-                if chunk_type in {"meta", "meta_ocr", "system"}:
-                    chunk = dict(chunk)
-                    chunk["assistant_live_meta_html"] = self._render_live_assistant_activity(
-                        model_name=selected_model,
-                        meta=meta,
-                        enabled_tools=enabled_tools,
-                        live_tool_history=live_tool_history,
-                        system_messages=live_system_messages,
-                    )
+                    process_delta = {}
+                    if normalized_system:
+                        process_delta["system_messages"] = [normalized_system]
+                    if current_live_tool_history:
+                        process_delta["tool_call_history"] = [dict(item) for item in current_live_tool_history]
+                    if process_delta:
+                        if enabled_tools and not process_defaults_emitted:
+                            process_delta = {"enabled_tools": list(enabled_tools), **process_delta}
+                            process_defaults_emitted = True
+                        process_block = self._append_process_block(assistant_blocks, process_delta)
+                        if process_block is not None:
+                            chunk["assistant_live_meta_html"] = self._render_process_block_html(
+                                selected_model,
+                                process_block.get("content", {}),
+                            )
+                chunk["tool_call_active"] = self._has_running_tool_call(current_live_tool_history)
                 yield chunk
 
             title_event = poll_title_event()
             if title_event:
                 yield title_event
-        except Exception:
-            state.session.rollback_last_user_message()
-            if state.epoch > 0:
-                state.epoch -= 1
+        except BaseException:
+            rollback_pending_turn()
             raise
 
-        final_answer = "".join(assistant_text_parts).strip()
-        final_thinking = "".join(thinking_parts).strip()
+        final_answer = "".join(assistant_text_parts)
+        final_answer_text = final_answer.strip()
 
-        if not final_answer:
+        if not final_answer_text:
             final_answer = "模型没有返回有效内容。"
+            final_answer_text = final_answer
+            if not assistant_blocks or str(assistant_blocks[-1].get("kind", "")).strip() != "answer":
+                assistant_blocks.append({"kind": "answer", "content": final_answer})
+            else:
+                assistant_blocks[-1]["content"] = final_answer
 
         state.session.add_assistant_message(
-            content=final_answer,
-            thinking=final_thinking,
+            content=final_answer_text,
             model_name=selected_model,
             meta=meta,
+            ordered_blocks=assistant_blocks,
+            history_messages=history_messages,
         )
+        user_message_added = False
 
         auto_save_result: dict[str, str] | None = None
         auto_save_error = ""
@@ -1088,25 +1309,30 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         except Exception as exc:
             auto_save_error = str(exc)
 
+        latest_assistant_thinking = ""
+        for block in reversed(assistant_blocks):
+            if str(block.get("kind", "")).strip() != "thinking":
+                continue
+            latest_assistant_thinking = str(block.get("content", "") or "").strip()
+            if latest_assistant_thinking:
+                break
+
         yield {
             "type": "done",
+            "tool_call_active": False,
             "title": state.title or "新对话",
             "epoch": state.epoch,
             "token_count": self._estimate_total_tokens(state.session),
             "total_tokens": self._estimate_total_tokens(state.session),
             "context_tokens": self._estimate_context_tokens(state.session.get_history()),
             "context_messages": self._serialize_context_messages(state.session.get_history()),
-            "latest_assistant_thinking": final_thinking,
-            "assistant_answer_text": final_answer,
-            "assistant_answer_html": self._render_answer_block(final_answer),
-            "assistant_meta_html": self._render_assistant_meta(
-                model_name=selected_model,
-                thinking=final_thinking,
-                meta=meta,
-                enabled_tools=enabled_tools,
+            "latest_assistant_thinking": latest_assistant_thinking,
+            "assistant_answer_text": final_answer_text,
+            "assistant_blocks_html": self._render_assistant_blocks_html(
+                selected_model,
+                assistant_blocks,
             ),
             "user_html": self._render_user_block(original_text, image_paths, attachment_infos),
-            "system_messages": live_system_messages,
             "saved_basename": (auto_save_result or {}).get("saved_basename", state.saved_basename),
             "saved_path": (auto_save_result or {}).get("saved_path", ""),
             "autosave_error": auto_save_error,
@@ -1259,6 +1485,11 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
         elif "minimax" in selected_model.lower():
             extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
+            high_speed = bool(extras.get("high_speed", False))
+            if high_speed and not resolved_model.endswith("-highspeed"):
+                resolved_model = f"{resolved_model}-highspeed"
+            elif not high_speed and resolved_model.endswith("-highspeed"):
+                resolved_model = resolved_model.replace("-highspeed", "")
 
         return resolved_model, extra_kwargs
 
@@ -1270,6 +1501,8 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             "assistant_questions",
             "user_inputs",
             "tool_call_history",
+            "tool_calls",
+            "history_messages",
         }
         for key, value in chunk.items():
             if key == "type":
@@ -1282,6 +1515,144 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                         target.append(item)
             else:
                 meta[key] = value
+
+    def _append_stream_text_block(
+        self,
+        blocks: list[dict[str, Any]],
+        kind: str,
+        text: str,
+    ) -> dict[str, Any] | None:
+        if not text:
+            return None
+        if blocks and str(blocks[-1].get("kind", "")).strip() == kind:
+            blocks[-1]["content"] = str(blocks[-1].get("content", "")) + text
+            return blocks[-1]
+        block = {"kind": kind, "content": text}
+        blocks.append(block)
+        return block
+
+    def _merge_process_payload(self, target: dict[str, Any], delta: dict[str, Any]) -> None:
+        list_keys = {
+            "enabled_tools",
+            "search_keywords",
+            "uris",
+            "ocr_results",
+            "system_messages",
+        }
+        for key, value in delta.items():
+            if key == "tool_call_history":
+                values = value if isinstance(value, list) else [value]
+                target[key] = [dict(item) if isinstance(item, dict) else item for item in values]
+                continue
+            if key in list_keys:
+                values = value if isinstance(value, list) else [value]
+                bucket = target.setdefault(key, [])
+                for item in values:
+                    if item not in bucket:
+                        bucket.append(item)
+                continue
+            target[key] = value
+
+    def _append_process_block(
+        self,
+        blocks: list[dict[str, Any]],
+        delta: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not delta:
+            return None
+        if blocks and str(blocks[-1].get("kind", "")).strip() == "process":
+            content = blocks[-1].setdefault("content", {})
+            if isinstance(content, dict):
+                self._merge_process_payload(content, delta)
+                return blocks[-1]
+        block = {"kind": "process", "content": {}}
+        self._merge_process_payload(block["content"], delta)
+        blocks.append(block)
+        return block
+
+    def _extract_meta_delta(
+        self,
+        seen_meta: dict[str, Any],
+        chunk: dict[str, Any],
+    ) -> dict[str, Any]:
+        delta: dict[str, Any] = {}
+        list_keys = {
+            "enabled_tools",
+            "uris",
+            "ocr_results",
+            "search_keywords",
+            "assistant_questions",
+            "user_inputs",
+            "tool_call_history",
+            "history_messages",
+        }
+        for key, value in chunk.items():
+            if key in {"type", "thinking_time", "tool_calls"}:
+                continue
+            if key in list_keys:
+                values = value if isinstance(value, list) else [value]
+                target = seen_meta.setdefault(key, [])
+                new_items = []
+                for item in values:
+                    if item not in target:
+                        target.append(item)
+                        new_items.append(item)
+                if new_items:
+                    delta[key] = new_items
+                continue
+            if seen_meta.get(key) != value:
+                seen_meta[key] = value
+                if value not in (None, "", [], {}):
+                    delta[key] = value
+        return delta
+
+    def _attach_thinking_supplements(
+        self,
+        blocks: list[dict[str, Any]],
+        delta: dict[str, Any],
+        *,
+        thinking_time: Any = None,
+    ) -> None:
+        thinking_block = None
+        for block in reversed(blocks):
+            if str(block.get("kind", "")).strip() == "thinking":
+                thinking_block = block
+                break
+
+        normalized_time = None
+        if isinstance(thinking_time, (int, float)) and thinking_time > 0:
+            normalized_time = float(thinking_time)
+
+        if thinking_block is None:
+            has_supplement = any(delta.get(key) for key in ("assistant_questions", "user_inputs"))
+            if normalized_time is None and not has_supplement:
+                return
+            thinking_block = {"kind": "thinking", "content": ""}
+            blocks.append(thinking_block)
+
+        if normalized_time is not None:
+            thinking_block["thinking_time"] = normalized_time
+
+        for key in ("assistant_questions", "user_inputs"):
+            values = delta.pop(key, None)
+            if not values:
+                continue
+            bucket = thinking_block.setdefault(key, [])
+            for item in values if isinstance(values, list) else [values]:
+                if item not in bucket:
+                    bucket.append(item)
+
+    def _render_process_block_html(self, model_name: str, payload: dict[str, Any]) -> str:
+        if not payload:
+            return ""
+        return _render_assistant_blocks([{"kind": "process", "content": payload}], model_name)
+
+    def _render_assistant_blocks_html(
+        self,
+        model_name: str,
+        blocks: list[dict[str, Any]],
+    ) -> str:
+        return _render_assistant_blocks(blocks, model_name)
 
     def _render_live_assistant_activity(
         self,
@@ -1326,6 +1697,9 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
         running_items = [item for item in live_items if str(item.get("status", "")) == "running"]
         return final_items + running_items
+
+    def _has_running_tool_call(self, live_tool_history: list[dict[str, Any]]) -> bool:
+        return any(str(item.get("status", "")) == "running" for item in live_tool_history if isinstance(item, dict))
 
     def _normalize_system_message(self, content: Any) -> str:
         text = re.sub(r"\x1b\[[0-9;]*m", "", str(content or ""))
@@ -1672,7 +2046,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
         return f'<div class="supplement-assistant">{_render_markdown_block(str(question_item))}</div>'
 
-    def _render_ocr_item(self, item: dict[str, Any]) -> str:
+    def _render_ocr_item(self, item: dict[str, Any], allow_thematic_break: bool = True) -> str:
         image_path = str(item.get("image_path", "") or "")
         ocr_text = str(item.get("ocr_text", "") or "")
         extra = ""
@@ -1683,12 +2057,12 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 f'<a href="{file_url}" target="_blank" rel="noreferrer">{html.escape(os.path.basename(image_path))}</a>'
                 "</div>"
             )
-        return f'<div class="kv-item">{extra}{_render_markdown_block(ocr_text)}</div>'
+        return f'<div class="kv-item">{extra}{_render_markdown_block(ocr_text, allow_thematic_break=allow_thematic_break)}</div>'
 
-    def _render_tool_history(self, content: Any) -> str:
+    def _render_tool_history(self, content: Any, allow_thematic_break: bool = True) -> str:
         items = content if isinstance(content, list) else []
         if not items:
-            return self._render_data_block(content)
+            return self._render_data_block(content, allow_thematic_break=allow_thematic_break)
 
         blocks = []
         for item in items:
@@ -1699,7 +2073,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 if key == "name":
                     continue
                 detail_blocks.append(
-                    f'<div class="kv-item"><div class="kv-key">{html.escape(str(key))}</div>{self._render_data_block(value)}</div>'
+                    f'<div class="kv-item"><div class="kv-key">{html.escape(str(key))}</div>{self._render_data_block(value, allow_thematic_break=allow_thematic_break)}</div>'
                 )
             detail_html = f'<div class="kv-list">{"".join(detail_blocks)}</div>' if detail_blocks else ""
             blocks.append(
@@ -1733,21 +2107,24 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         chips = "".join(f'<span class="chip">{html.escape(str(value))}</span>' for value in values if value not in (None, ""))
         return f'<div class="chip-list">{chips}</div>'
 
-    def _render_list_block(self, values: list[Any]) -> str:
-        items = "".join(f'<div class="kv-item">{self._render_data_block(value)}</div>' for value in values)
-        return f'<div class="kv-list">{"".join(items)}</div>'
+    def _render_list_block(self, values: list[Any], allow_thematic_break: bool = True) -> str:
+        items = "".join(
+            f'<div class="kv-item">{self._render_data_block(value, allow_thematic_break=allow_thematic_break)}</div>'
+            for value in values
+        )
+        return f'<div class="kv-list">{items}</div>'
 
-    def _render_data_block(self, value: Any) -> str:
+    def _render_data_block(self, value: Any, allow_thematic_break: bool = True) -> str:
         if isinstance(value, dict):
             parts = []
             for key, inner_value in value.items():
                 parts.append(
-                    f'<div class="kv-item"><div class="kv-key">{html.escape(str(key))}</div>{self._render_data_block(inner_value)}</div>'
+                    f'<div class="kv-item"><div class="kv-key">{html.escape(str(key))}</div>{self._render_data_block(inner_value, allow_thematic_break=allow_thematic_break)}</div>'
                 )
             return f'<div class="kv-list">{"".join(parts)}</div>'
         if isinstance(value, list):
-            return self._render_list_block(value)
-        return _render_markdown_block("" if value is None else str(value))
+            return self._render_list_block(value, allow_thematic_break=allow_thematic_break)
+        return _render_markdown_block("" if value is None else str(value), allow_thematic_break=allow_thematic_break)
 
     def _wrap_meta_section(self, title: str, body: str) -> str:
         return f'<section class="meta-section"><div class="meta-title">{html.escape(title)}</div>{body}</section>'
@@ -1969,21 +2346,42 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             },
             {
                 "id": "doubao-seed-2-0-pro-260215",
-                "label": "Doubao Pro",
+                "label": "豆包 2.0 Pro",
                 "supports_attachments": True,
                 "thinking": self._level_options(default="medium"),
                 "extra_fields": [{"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False}],
             },
             {
                 "id": "doubao-seed-2-0-lite-260215",
-                "label": "Doubao Lite",
+                "label": "豆包 2.0 Lite",
                 "supports_attachments": True,
                 "thinking": self._level_options(default="medium"),
                 "extra_fields": [{"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False}],
             },
             {
                 "id": "doubao-seed-2-0-mini-260215",
-                "label": "Doubao Mini",
+                "label": "豆包 2.0 Mini",
+                "supports_attachments": True,
+                "thinking": self._level_options(default="medium"),
+                "extra_fields": [{"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False}],
+            },
+            {
+                "id": "doubao-seed-1-8-251228",
+                "label": "豆包 1.8",
+                "supports_attachments": True,
+                "thinking": self._level_options(default="medium"),
+                "extra_fields": [{"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False}],
+            },
+            {
+                "id": "doubao-seed-1-6-251015",
+                "label": "豆包 1.6",
+                "supports_attachments": True,
+                "thinking": self._level_options(default="medium"),
+                "extra_fields": [{"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False}],
+            },
+            {
+                "id": "doubao-seed-1-6-flash-250828",
+                "label": "豆包 1.6 Flash",
                 "supports_attachments": True,
                 "thinking": self._level_options(default="medium"),
                 "extra_fields": [{"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False}],
@@ -2006,14 +2404,32 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 "label": "MiniMax M2.7",
                 "supports_attachments": True,
                 "thinking": None,
-                "extra_fields": [{"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False}],
+                "extra_fields": [
+                    {"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False},
+                    {
+                        "key": "high_speed",
+                        "type": "boolean",
+                        "label": "高速模式",
+                        "description": "相同质量，1.5倍速回答，2倍token消耗",
+                        "default": False,
+                    },
+                ],
             },
             {
                 "id": "MiniMax-M2.5",
                 "label": "MiniMax M2.5",
                 "supports_attachments": True,
                 "thinking": None,
-                "extra_fields": [{"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False}],
+                "extra_fields": [
+                    {"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False},
+                    {
+                        "key": "high_speed",
+                        "type": "boolean",
+                        "label": "高速模式",
+                        "description": "相同质量，1.5倍速回答，2倍token消耗",
+                        "default": False,
+                    },
+                ],
             },
             {
                 "id": "multi-assistant-old-preview",

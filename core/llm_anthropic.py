@@ -1,5 +1,6 @@
 from anthropic import Anthropic
 from typing import Any, Dict, Generator, List, Tuple
+import json
 import time
 from .llm_base import BaseLLMClient
 from tools.vision_tools import perform_ocr
@@ -7,9 +8,67 @@ from tools.web_search_ds import web_search_tool_schema, search_web
 
 
 class AnthropicLLMClient(BaseLLMClient):
+    def _extract_tool_use_ids(self, content_blocks: Any) -> set[str]:
+        tool_use_ids: set[str] = set()
+        if not isinstance(content_blocks, list):
+            return tool_use_ids
+
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use":
+                continue
+            tool_use_id = str(block.get("id", "")).strip()
+            if tool_use_id:
+                tool_use_ids.add(tool_use_id)
+        return tool_use_ids
+
+    def _convert_openai_tool_calls(self, message: Dict[str, Any]) -> List[Dict[str, Any]]:
+        tool_uses: List[Dict[str, Any]] = []
+        raw_tool_calls = message.get("tool_calls", [])
+        if not isinstance(raw_tool_calls, list):
+            return tool_uses
+
+        for tool_call in raw_tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+
+            tool_use_id = str(tool_call.get("id", "")).strip()
+            function_info = tool_call.get("function", {})
+            if not isinstance(function_info, dict):
+                function_info = {}
+            tool_name = str(function_info.get("name", "")).strip()
+            raw_arguments = function_info.get("arguments", {})
+
+            if not tool_use_id or not tool_name:
+                continue
+
+            tool_input: Dict[str, Any] = {}
+            if isinstance(raw_arguments, dict):
+                tool_input = raw_arguments
+            elif isinstance(raw_arguments, str):
+                arg_text = raw_arguments.strip()
+                if arg_text:
+                    try:
+                        decoded = json.loads(arg_text)
+                        if isinstance(decoded, dict):
+                            tool_input = decoded
+                    except json.JSONDecodeError:
+                        tool_input = {}
+
+            tool_uses.append({
+                "type": "tool_use",
+                "id": tool_use_id,
+                "name": tool_name,
+                "input": tool_input,
+            })
+
+        return tool_uses
+
     def _convert_history(self, messages: List[Dict[str, str | list]]) -> Tuple[str | None, List[Dict[str, Any]]]:
         system_parts: List[str] = []
         converted: List[Dict[str, Any]] = []
+        pending_tool_use_ids: set[str] = set()
 
         for msg in messages:
             role = msg.get("role", "user")
@@ -28,8 +87,41 @@ class AnthropicLLMClient(BaseLLMClient):
             elif role == "assistant":
                 if isinstance(content, list):
                     converted.append({"role": "assistant", "content": content})
+                    pending_tool_use_ids.update(self._extract_tool_use_ids(content))
+                elif isinstance(msg.get("tool_calls"), list):
+                    assistant_blocks: List[Dict[str, Any]] = []
+                    if content:
+                        assistant_blocks.append({"type": "text", "text": str(content)})
+                    tool_uses = self._convert_openai_tool_calls(msg)
+                    assistant_blocks.extend(tool_uses)
+                    if assistant_blocks:
+                        converted.append({"role": "assistant", "content": assistant_blocks})
+                        pending_tool_use_ids.update(self._extract_tool_use_ids(assistant_blocks))
+                    else:
+                        converted.append({"role": "assistant", "content": str(content)})
                 else:
                     converted.append({"role": "assistant", "content": str(content)})
+            elif role == "tool":
+                tool_call_id = str(msg.get("tool_call_id", "")).strip()
+                if not tool_call_id or tool_call_id not in pending_tool_use_ids:
+                    # 历史中若缺少对应的 assistant/tool_use，则该 tool_result 会触发 400，需跳过。
+                    continue
+
+                pending_tool_use_ids.remove(tool_call_id)
+                tool_result = {
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": content,
+                }
+                previous_content = converted[-1].get("content") if converted and converted[-1].get("role") == "user" else None
+                if (
+                    isinstance(previous_content, list)
+                    and previous_content
+                    and all(isinstance(block, dict) and block.get("type") == "tool_result" for block in previous_content)
+                ):
+                    previous_content.append(tool_result)
+                else:
+                    converted.append({"role": "user", "content": [tool_result]})
 
         system_prompt = "\n\n".join(part for part in system_parts if part).strip()
         return system_prompt or None, converted
@@ -78,7 +170,18 @@ class AnthropicLLMClient(BaseLLMClient):
         using_minimax = "minimax" in self.model_name.lower()
         special = False
 
-        if self.model_name == "MiniMax-M2.5" and "马嘉祺" in req_messages[-1]["content"][0].get("text", ""):
+        last_text = ""
+        if req_messages:
+            last_content = req_messages[-1].get("content", "")
+            if isinstance(last_content, list):
+                for block in last_content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        last_text = str(block.get("text", ""))
+                        break
+            else:
+                last_text = str(last_content)
+
+        if self.model_name == "MiniMax-M2.5" and "马嘉祺" in last_text:
             special = True
 
         if using_minimax and temperature >= 1.0:
@@ -95,6 +198,8 @@ class AnthropicLLMClient(BaseLLMClient):
         tool_call_history: List[Dict[str, str]] = []
         search_keywords: List[str] = []
         search_sources: List[str] = []
+        req_tool_calls: List[Dict] = []  # 记录发送给模型的工具调用信息，包含工具名称、调用参数等
+        history_messages: List[Dict[str, Any]] = []  # 记录本轮 assistant/tool 的真实顺序消息
 
         def _extend_unique(target: List[str], values: List[Any]) -> None:
             for value in values:
@@ -103,6 +208,41 @@ class AnthropicLLMClient(BaseLLMClient):
                 normalized = value.strip()
                 if normalized and normalized not in target:
                     target.append(normalized)
+
+        def _append_history_message(message: Dict[str, Any]) -> None:
+            if not isinstance(message, dict):
+                return
+            history_messages.append(dict(message))
+
+        def _build_assistant_tool_call_message(content_blocks: List[Any]) -> Dict[str, Any]:
+            text_parts: List[str] = []
+            tool_calls: List[Dict[str, Any]] = []
+            for block in content_blocks:
+                dumped = self._dump_content_block(block)
+                block_type = str(dumped.get("type", "")).strip()
+                if block_type == "text":
+                    text_parts.append(str(dumped.get("text", "")))
+                    continue
+                if block_type != "tool_use":
+                    continue
+
+                tool_input = dumped.get("input", {})
+                if not isinstance(tool_input, dict):
+                    tool_input = {}
+                tool_calls.append({
+                    "id": str(dumped.get("id", "")).strip(),
+                    "type": "function",
+                    "function": {
+                        "name": str(dumped.get("name", "")).strip(),
+                        "arguments": json.dumps(tool_input, ensure_ascii=False),
+                    },
+                })
+
+            return {
+                "role": "assistant",
+                "content": "".join(text_parts),
+                "tool_calls": [item for item in tool_calls if item.get("id") and item["function"].get("name")],
+            }
 
         client = Anthropic(api_key=self.api_key, base_url=self.base_url)
         max_tokens = 8192
@@ -160,10 +300,13 @@ class AnthropicLLMClient(BaseLLMClient):
                 if not tool_uses:
                     break
 
+                assistant_tool_call_message = _build_assistant_tool_call_message(final_message.content)
                 req_messages.append({
                     "role": "assistant",
                     "content": [self._dump_content_block(block) for block in final_message.content],
                 })
+                if assistant_tool_call_message.get("tool_calls"):
+                    _append_history_message(assistant_tool_call_message)
 
                 tool_result_blocks = []
                 for tool_use in tool_uses:
@@ -202,6 +345,11 @@ class AnthropicLLMClient(BaseLLMClient):
                                 "tool_use_id": tool_use.id,
                                 "content": search_results.get("results", ""),
                             })
+                            req_tool_calls.append({
+                                "role": "tool",
+                                "tool_call_id": tool_use.id,
+                                "content": search_results.get("results", ""),
+                            })
                         else:
                             tool_call_history.append({
                                 "name": tool_use.name,
@@ -229,6 +377,14 @@ class AnthropicLLMClient(BaseLLMClient):
                     "role": "user",
                     "content": tool_result_blocks,
                 })
+                for tool_result in tool_result_blocks:
+                    if not isinstance(tool_result, dict):
+                        continue
+                    _append_history_message({
+                        "role": "tool",
+                        "tool_call_id": tool_result.get("tool_use_id", ""),
+                        "content": tool_result.get("content", ""),
+                    })
 
             final_meta: Dict[str, Any] = {}
             if search_keywords:
@@ -237,6 +393,10 @@ class AnthropicLLMClient(BaseLLMClient):
                 final_meta["uris"] = search_sources
             if tool_call_history:
                 final_meta["tool_call_history"] = tool_call_history
+            if req_tool_calls:
+                final_meta["tool_calls"] = req_tool_calls
+            if history_messages:
+                final_meta["history_messages"] = history_messages
             if final_meta:
                 yield {"type": "meta", **final_meta}
         finally:

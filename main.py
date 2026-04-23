@@ -233,6 +233,11 @@ def main(ui: UIController = None):
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用Kimi联网搜索？")
                     elif "minimax" in model_name.lower():
                         extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
+                        high_speed = ui.get_boolean_input("是否启用高速模式(相同质量，1.5倍速回答，2倍token消耗)")
+                        if not model_name.endswith("-highspeed") and high_speed:
+                            new_model_name = model_name + "-highspeed"
+                        elif not high_speed and model_name.endswith("-highspeed"):
+                            new_model_name = model_name.replace("-highspeed", "")
                     elif "multi-assistant" in model_name:
                         ui.display_warning("multi-assistant 目前处于预览阶段，完全由AI生成代码，并且从未测试，可能存在不稳定和不可预知的表现，请谨慎选择。可直接 Ctrl+C 重新选择模型")
 
@@ -240,6 +245,8 @@ def main(ui: UIController = None):
                     enabled_tools = []
                     if extra_kwargs.get("enable_search"):
                         enabled_tools.append("web_search")
+                    if extra_kwargs.get("time_only"):
+                        enabled_tools.append("time_tool")
                     session.add_enabled_tools(enabled_tools)  # 记录启用的工具到 Session
                     llm_client = LLMFactory.create_client(new_model_name, keys)
                     # 获取流生成器

@@ -47,9 +47,12 @@ class UIController:
             "12": "doubao-seed-2-0-pro-260215",
             "13": "doubao-seed-2-0-lite-260215",
             "14": "doubao-seed-2-0-mini-260215",
-            "15": "kimi-k2.5",
-            "16": "MiniMax-M2.7",
-            "17": "MiniMax-M2.5"
+            "15": "doubao-seed-1-8-251228",
+            "16": "doubao-seed-1-6-251015",
+            "17": "doubao-seed-1-6-flash-250828",
+            "18": "kimi-k2.5",
+            "19": "MiniMax-M2.7",
+            "20": "MiniMax-M2.5"
             }
 
     def get_user_input(self, prompt: str = "请输入文本：", empty_choice: str = None) -> str:

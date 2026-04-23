@@ -1,12 +1,77 @@
 import os
 import pathlib
+import json
 from dashscope import MultiModalConversation
 import dashscope 
 import time
 from .llm_base import BaseLLMClient
-from typing import Dict, Generator, List
+from typing import Any, Dict, Generator, List
 
 class QwenClient(BaseLLMClient):
+    def _stringify_content(self, content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(content)
+
+    def _format_tool_calls(self, message: Dict[str, Any]) -> str:
+        raw_tool_calls = message.get("tool_calls", [])
+        if not isinstance(raw_tool_calls, list):
+            return ""
+
+        summaries: list[str] = []
+        for tool_call in raw_tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function_info = tool_call.get("function", {})
+            if not isinstance(function_info, dict):
+                function_info = {}
+            name = str(function_info.get("name") or tool_call.get("name") or "").strip()
+            arguments = self._stringify_content(function_info.get("arguments", ""))
+            call_id = str(tool_call.get("id", "") or "").strip()
+            if not name and not call_id:
+                continue
+            label = name or "tool"
+            suffix = f" id={call_id}" if call_id else ""
+            summaries.append(f"[Tool call: {label}{suffix} arguments={arguments}]")
+        return "\n".join(summaries)
+
+    def _format_tool_result(self, message: Dict[str, Any]) -> str:
+        call_id = str(message.get("tool_call_id", "") or "").strip()
+        label = f"[Tool result id={call_id}]" if call_id else "[Tool result]"
+        return f"{label}\n{self._stringify_content(message.get('content', ''))}"
+
+    def _convert_history(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+
+            role = str(msg.get("role", "")).strip()
+            content = msg.get("content", "")
+
+            if role in {"system", "user"}:
+                converted.append({"role": role, "content": content if isinstance(content, list) else self._stringify_content(content)})
+                continue
+
+            if role == "assistant":
+                text = self._stringify_content(content)
+                tool_summary = self._format_tool_calls(msg)
+                if tool_summary:
+                    text = f"{text}\n\n{tool_summary}".strip()
+                if text:
+                    converted.append({"role": "assistant", "content": text})
+                continue
+
+            if role == "tool":
+                converted.append({"role": "user", "content": self._format_tool_result(msg)})
+
+        return converted
+
     def chat_stream(self, messages: List[Dict[str, str | list]], temperature: float, image_paths: List[str] = None, **kwargs) -> Generator[Dict[str, str], None, None]:
         def _safe_get(obj, key, default=None):
             if obj is None:
@@ -18,10 +83,10 @@ class QwenClient(BaseLLMClient):
             except (AttributeError, KeyError, TypeError):
                 return default
         tool_call_history = []  # 用于记录工具调用的历史，包含工具名称和调用状态（成功/被拒绝）
-        req_messages = [msg.copy() for msg in messages]
+        req_messages = self._convert_history(messages)
         if image_paths:
             last_content = req_messages[-1]["content"]
-            new_content = [{"text": last_content}]
+            new_content = [{"text": self._stringify_content(last_content)}]
             for img_path in image_paths:
                 path_url = pathlib.Path(img_path).resolve().as_uri()
                 # DashScope expects Windows drive-letter file URIs as file://C:/...

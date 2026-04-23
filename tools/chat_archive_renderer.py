@@ -12,7 +12,6 @@ from latex2mathml.converter import convert as latex_to_mathml
 def render_chat_archive_html(full_context: list[dict], title: str) -> str:
     structure = _build_render_structure(full_context)
     turns_html = "\n".join(_render_turn(turn) for turn in structure["turns"])
-    system_html = _render_system_panel(structure["system_messages"], structure["misc_messages"])
     title_html = html.escape(title)
 
     return f"""<!DOCTYPE html>
@@ -235,6 +234,11 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
         .message-content pre {{
             margin: 0 0 0.9em;
         }}
+        .message-content hr {{
+            margin: 1.05em 0;
+            border: 0;
+            border-top: 1px solid var(--line);
+        }}
         .message-content ul,
         .message-content ol {{
             padding-left: 1.4em;
@@ -294,7 +298,8 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
         .message-content tr:nth-child(even) td {{
             background: rgba(255, 255, 255, 0.55);
         }}
-        .message-content .katex-display {{
+        .message-content .katex-display,
+        .message-content .math-block {{
             overflow-x: auto;
             overflow-y: hidden;
             padding: 0.15em 0;
@@ -303,23 +308,26 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             color: #0f5ec9;
             text-decoration: none;
         }}
-            .message-content .math-inline,
-            .message-content .math-block {{
-                overflow-x: auto;
-                overflow-y: hidden;
-            }}
-            .message-content .math-inline {{
-                display: inline-flex;
-                vertical-align: middle;
-            }}
-            .message-content .math-block {{
-                display: block;
-                margin: 0.35em 0;
-            }}
-            .message-content .math-inline math,
-            .message-content .math-block math {{
-                font-size: 1em;
-            }}
+        .message-content .math-inline {{
+            display: inline-flex;
+            max-width: 100%;
+            overflow-x: auto;
+            overflow-y: hidden;
+            vertical-align: middle;
+        }}
+        .message-content .math-block {{
+            display: block;
+            width: 100%;
+            margin: 1em 0;
+            text-align: center;
+        }}
+        .message-content .math-inline math,
+        .message-content .math-block math {{
+            font-size: 1em;
+        }}
+        .message-content .math-block math {{
+            display: inline-block;
+        }}
         .message-content a:hover {{
             text-decoration: underline;
         }}
@@ -472,7 +480,6 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
                 <button class="toggle-all-button" type="button" id="toggle-all-details">全部展开</button>
             </div>
         </header>
-        {system_html}
         <section class="conversation">
             {turns_html}
         </section>
@@ -539,6 +546,7 @@ def _build_render_structure(full_context: list[dict]) -> dict:
     current_turn = None
     pending_epoch = None
     pending_user_meta = []
+    pending_process_items: list[dict] = []
 
     def ensure_turn() -> dict:
         nonlocal current_turn
@@ -547,18 +555,33 @@ def _build_render_structure(full_context: list[dict]) -> dict:
                 "epoch": pending_epoch,
                 "user": None,
                 "user_meta": [],
-                "assistant": None,
-                "assistant_meta": [],
+                "assistant_model": "",
+                "assistant_blocks": [],
             }
         return current_turn
 
-    def flush_turn():
+    def get_last_thinking_block() -> dict | None:
+        turn = ensure_turn()
+        for block in reversed(turn["assistant_blocks"]):
+            if block.get("kind") == "thinking":
+                return block
+        return None
+
+    def flush_pending_process() -> None:
+        if not pending_process_items:
+            return
+        payload = _build_legacy_process_payload(pending_process_items)
+        pending_process_items.clear()
+        if payload:
+            ensure_turn()["assistant_blocks"].append({"kind": "process", "content": payload})
+
+    def flush_turn() -> None:
         nonlocal current_turn, pending_epoch, pending_user_meta
+        flush_pending_process()
         if current_turn and (
             current_turn["user"] is not None
-            or current_turn["assistant"] is not None
             or current_turn["user_meta"]
-            or current_turn["assistant_meta"]
+            or current_turn["assistant_blocks"]
         ):
             turns.append(current_turn)
         current_turn = None
@@ -566,6 +589,9 @@ def _build_render_structure(full_context: list[dict]) -> dict:
         pending_user_meta = []
 
     for msg in full_context:
+        if not isinstance(msg, dict):
+            continue
+
         role = msg.get("role")
         content = msg.get("content")
 
@@ -578,7 +604,7 @@ def _build_render_structure(full_context: list[dict]) -> dict:
             continue
 
         if role == "epoch_count":
-            if current_turn and (current_turn["user"] is not None or current_turn["assistant"] is not None):
+            if current_turn and (current_turn["user"] is not None or current_turn["assistant_blocks"]):
                 flush_turn()
             pending_epoch = content
             continue
@@ -588,46 +614,95 @@ def _build_render_structure(full_context: list[dict]) -> dict:
             continue
 
         if role == "user":
-            if current_turn and (current_turn["user"] is not None or current_turn["assistant"] is not None):
+            if current_turn and (current_turn["user"] is not None or current_turn["assistant_blocks"]):
                 flush_turn()
             current_turn = {
                 "epoch": pending_epoch,
                 "user": content,
                 "user_meta": pending_user_meta.copy(),
-                "assistant": None,
-                "assistant_meta": [],
+                "assistant_model": "",
+                "assistant_blocks": [],
             }
             pending_user_meta = []
             continue
 
-        if role == "assistant_answer":
-            turn = ensure_turn()
-            turn["assistant"] = content
+        if role == "model":
+            ensure_turn()["assistant_model"] = str(content or "").strip()
+            continue
+
+        if role == "assistant_thinking":
+            flush_pending_process()
+            block = {"kind": "thinking", "content": str(content or "")}
+            thinking_time = _coerce_numeric_time(msg.get("thinking_time"))
+            if thinking_time is not None and thinking_time > 0:
+                block["thinking_time"] = thinking_time
+            assistant_questions = msg.get("assistant_questions")
+            if isinstance(assistant_questions, list) and assistant_questions:
+                block["assistant_questions"] = list(assistant_questions)
+            user_inputs = msg.get("user_inputs")
+            if isinstance(user_inputs, list) and user_inputs:
+                block["user_inputs"] = list(user_inputs)
+            ensure_turn()["assistant_blocks"].append(block)
+            continue
+
+        if role == "assistant_thinking_time":
+            last_thinking = get_last_thinking_block()
+            if last_thinking is not None:
+                thinking_time = _coerce_numeric_time(content)
+                if thinking_time is not None and thinking_time > 0:
+                    last_thinking["thinking_time"] = thinking_time
+            continue
+
+        if role == "assistant_questions":
+            last_thinking = get_last_thinking_block()
+            if last_thinking is not None:
+                last_thinking.setdefault("assistant_questions", [])
+                last_thinking["assistant_questions"].extend(_coerce_list(content))
+            else:
+                pending_process_items.append(msg)
+            continue
+
+        if role == "user_inputs":
+            last_thinking = get_last_thinking_block()
+            if last_thinking is not None:
+                last_thinking.setdefault("user_inputs", [])
+                last_thinking["user_inputs"].extend(_coerce_list(content))
+            else:
+                pending_process_items.append(msg)
+            continue
+
+        if role == "assistant_process":
+            flush_pending_process()
+            if isinstance(content, dict):
+                ensure_turn()["assistant_blocks"].append({"kind": "process", "content": dict(content)})
+            elif content not in (None, ""):
+                ensure_turn()["assistant_blocks"].append({"kind": "process", "content": {"raw": content}})
+            continue
+
+        if role in {"assistant_answer", "assistant_tool_calls"}:
+            flush_pending_process()
+            ensure_turn()["assistant_blocks"].append({"kind": "answer", "content": str(content or "")})
+            continue
+
+        if role == "tool":
             continue
 
         if role in {
-            "model",
             "search_results_links",
             "thinking_level",
             "tool_ocr_extraction",
             "search_keywords",
-            "assistant_questions",
-            "user_inputs",
             "tool_call_history",
-            "assistant_thinking",
-            "assistant_thinking_time",
             "assistant_original_answer",
             "enabled_tools",
         }:
-            turn = ensure_turn()
-            turn["assistant_meta"].append(msg)
+            pending_process_items.append(msg)
             continue
 
         misc_messages.append(msg)
 
     if pending_user_meta:
-        turn = ensure_turn()
-        turn["user_meta"].extend(pending_user_meta)
+        ensure_turn()["user_meta"].extend(pending_user_meta)
 
     flush_turn()
 
@@ -688,18 +763,17 @@ def _render_turn(turn: dict) -> str:
 </div>
 """
 
-    assistant_meta_html = _render_assistant_meta(turn.get("assistant_meta", []))
-    assistant_answer_html = ""
-    if turn.get("assistant") is not None:
-        assistant_answer_html = f'<div class="assistant-answer">{_render_markdown_block(str(turn["assistant"]))}</div>'
+    assistant_blocks_html = _render_assistant_blocks(
+        turn.get("assistant_blocks", []),
+        turn.get("assistant_model", ""),
+    )
 
     return f"""
 <article class="turn">
     {epoch_label}
     {user_html}
     <div class="assistant-block">
-        {assistant_meta_html}
-        {assistant_answer_html}
+        {assistant_blocks_html}
     </div>
 </article>
 """
@@ -754,125 +828,159 @@ def _render_user_meta(item: dict) -> str:
     return ""
 
 
-def _render_assistant_meta(items: list[dict]) -> str:
-    if not items:
+def _render_assistant_blocks(blocks: list[dict], model_name: str = "") -> str:
+    if not blocks:
+        return ""
+    return "".join(_render_assistant_block(block, model_name) for block in blocks)
+
+
+def _render_assistant_block(block: dict, model_name: str = "") -> str:
+    if not isinstance(block, dict):
         return ""
 
-    model_name = _extract_model_name(items)
-    thinking_time = _extract_thinking_time(items)
-    summary = _build_assistant_summary(model_name, thinking_time)
+    kind = str(block.get("kind", "")).strip().lower()
+    if kind == "thinking":
+        return _render_assistant_thinking_block(block, model_name)
+    if kind == "process":
+        return _render_assistant_process_block(block, model_name)
+    if kind == "answer":
+        return f'<div class="assistant-answer">{_render_markdown_block(str(block.get("content", "")))}</div>'
+    return ""
+
+
+def _render_assistant_thinking_block(block: dict, model_name: str = "") -> str:
     sections = []
+    thinking_content = str(block.get("content", ""))
+    assistant_questions = block.get("assistant_questions")
+    user_inputs = block.get("user_inputs")
+    thinking_time = _format_thinking_time(_coerce_numeric_time(block.get("thinking_time")))
 
-    for item in items:
-        role = item.get("role")
-        content = item.get("content")
+    if thinking_content:
+        sections.append(_wrap_meta_section("思考内容", _render_markdown_block(thinking_content)))
+    if assistant_questions:
+        sections.append(_wrap_meta_section("追问列表", _render_list_block(assistant_questions)))
+    if user_inputs:
+        sections.append(_wrap_meta_section("用户补充", _render_list_block(user_inputs)))
 
-        if role == "assistant_thinking":
-            sections.append(_wrap_meta_section("思考内容", _render_markdown_block(str(content))))
-        elif role == "tool_call_history":
-            sections.append(_wrap_meta_section("工具调用", _render_tool_history(content)))
-        elif role == "search_results_links":
-            sections.append(_wrap_meta_section("搜索来源", _render_link_list(content)))
-        elif role == "tool_ocr_extraction":
-            sections.append(_wrap_meta_section("OCR 提取", _render_ocr_result(content)))
-        elif role == "enabled_tools":
-            sections.append(_wrap_meta_section("启用工具", _render_chip_list(content)))
-        elif role == "search_keywords":
-            sections.append(_wrap_meta_section("搜索关键词", _render_chip_list(content)))
-        elif role == "assistant_questions":
-            sections.append(_wrap_meta_section("追问列表", _render_list_block(content)))
-        elif role == "user_inputs":
-            sections.append(_wrap_meta_section("用户补充", _render_list_block(content)))
-        elif role == "thinking_level":
-            sections.append(_wrap_meta_section("思考等级", _render_chip_list([content])))
-        elif role == "assistant_original_answer":
-            sections.append(_wrap_meta_section("原始回答", _render_markdown_block(str(content))))
-        elif role in {"model", "assistant_thinking_time"}:
-            continue
-        else:
-            sections.append(_wrap_meta_section(str(role), _render_data_block(content)))
-
+    summary = _build_assistant_summary(model_name, thinking_time)
     if not sections:
         return f'<div class="assistant-meta-inline">{html.escape(summary)}</div>' if summary else ""
 
-    body = "".join(sections)
     return f"""
-<details class="meta-box assistant-meta-box" style="margin-bottom: 14px;">
-    <summary>{_render_summary_content(summary)}</summary>
+<details class="meta-box assistant-meta-box assistant-thinking-box" style="margin-bottom: 14px;">
+    <summary>{_render_summary_content(summary or "查看思考内容")}</summary>
     <div class="meta-content">
-        {body}
+        {"".join(sections)}
     </div>
 </details>
 """
 
 
-def _render_assistant_meta(items: list[dict]) -> str:
-    if not items:
+def _render_assistant_process_block(block: dict, model_name: str = "") -> str:
+    payload = block.get("content", {})
+    if not isinstance(payload, dict):
+        payload = {"raw": payload}
+
+    sections = []
+    enabled_tools = payload.get("enabled_tools")
+    if enabled_tools:
+        sections.append(_wrap_meta_section("启用工具", _render_chip_list(enabled_tools)))
+
+    think_level = payload.get("think_level")
+    if think_level not in (None, ""):
+        sections.append(_wrap_meta_section("思考等级", _render_chip_list([think_level])))
+
+    search_keywords = payload.get("search_keywords")
+    if search_keywords:
+        sections.append(_wrap_meta_section("搜索关键词", _render_chip_list(search_keywords)))
+
+    uris = payload.get("uris")
+    if uris:
+        sections.append(_wrap_meta_section("搜索来源", _render_link_list(uris)))
+
+    ocr_results = payload.get("ocr_results")
+    if ocr_results:
+        ocr_blocks = "".join(_render_ocr_result(item) for item in ocr_results)
+        sections.append(_wrap_meta_section("OCR 提取", ocr_blocks))
+
+    tool_call_history = payload.get("tool_call_history")
+    if tool_call_history:
+        sections.append(_wrap_meta_section("工具调用", _render_tool_history(tool_call_history)))
+
+    system_messages = payload.get("system_messages")
+    if system_messages:
+        sections.append(_wrap_meta_section("过程日志", _render_markdown_block("\n\n".join(_coerce_list(system_messages)))))
+
+    original_answer = payload.get("assistant_original_answer")
+    if original_answer not in (None, ""):
+        sections.append(_wrap_meta_section("原始回答", _render_markdown_block(str(original_answer))))
+
+    raw_content = payload.get("raw")
+    if raw_content not in (None, ""):
+        sections.append(_wrap_meta_section("过程元数据", _render_data_block(raw_content)))
+
+    if not sections:
         return ""
 
-    model_name = _extract_model_name(items)
-    thinking_time = _extract_thinking_time(items)
-    thinking_summary = _build_assistant_summary(model_name, thinking_time)
-    thinking_sections = []
-    process_sections = []
-
-    for item in items:
-        role = item.get("role")
-        content = item.get("content")
-
-        if role == "assistant_thinking":
-            thinking_sections.append(_wrap_meta_section("思考内容", _render_markdown_block(str(content))))
-        elif role == "tool_call_history":
-            process_sections.append(_wrap_meta_section("工具调用", _render_tool_history(content)))
-        elif role == "search_results_links":
-            process_sections.append(_wrap_meta_section("搜索来源", _render_link_list(content)))
-        elif role == "tool_ocr_extraction":
-            process_sections.append(_wrap_meta_section("OCR 提取", _render_ocr_result(content)))
-        elif role == "enabled_tools":
-            process_sections.append(_wrap_meta_section("启用工具", _render_chip_list(content)))
-        elif role == "search_keywords":
-            process_sections.append(_wrap_meta_section("搜索关键词", _render_chip_list(content)))
-        elif role == "assistant_questions":
-            thinking_sections.append(_wrap_meta_section("追问列表", _render_list_block(content)))
-        elif role == "user_inputs":
-            thinking_sections.append(_wrap_meta_section("用户补充", _render_list_block(content)))
-        elif role == "thinking_level":
-            process_sections.append(_wrap_meta_section("思考等级", _render_chip_list([content])))
-        elif role == "assistant_original_answer":
-            process_sections.append(_wrap_meta_section("原始回答", _render_markdown_block(str(content))))
-        elif role in {"model", "assistant_thinking_time"}:
-            continue
-        else:
-            process_sections.append(_wrap_meta_section(str(role), _render_data_block(content)))
-
-    blocks = []
-    if thinking_sections:
-        blocks.append(
-            f"""
-<details class="meta-box assistant-meta-box assistant-thinking-box" style="margin-bottom: 14px;">
-    <summary>{_render_summary_content(thinking_summary or "查看思考内容")}</summary>
-    <div class="meta-content">
-        {"".join(thinking_sections)}
-    </div>
-</details>
-"""
-        )
-    if process_sections:
-        process_summary = f"{model_name} 过程元数据" if model_name else "查看过程元数据"
-        blocks.append(
-            f"""
+    process_summary = f"{model_name} 过程元数据" if model_name else "查看过程元数据"
+    return f"""
 <details class="meta-box assistant-meta-box assistant-process-box" style="margin-bottom: 14px;">
     <summary>{_render_summary_content(process_summary)}</summary>
     <div class="meta-content">
-        {"".join(process_sections)}
+        {"".join(sections)}
     </div>
 </details>
 """
-        )
 
-    if not blocks:
-        return f'<div class="assistant-meta-inline">{html.escape(thinking_summary)}</div>' if thinking_summary else ""
-    return "".join(blocks)
+
+def _build_legacy_process_payload(items: list[dict]) -> dict:
+    payload: dict = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        role = item.get("role")
+        content = item.get("content")
+        if role == "tool_call_history":
+            payload["tool_call_history"] = _coerce_tool_history(content)
+        elif role == "search_results_links":
+            payload["uris"] = _coerce_list(content)
+        elif role == "tool_ocr_extraction":
+            payload.setdefault("ocr_results", []).append(content)
+        elif role == "enabled_tools":
+            payload["enabled_tools"] = _coerce_list(content)
+        elif role == "search_keywords":
+            payload["search_keywords"] = _coerce_list(content)
+        elif role == "thinking_level":
+            payload["think_level"] = content
+        elif role == "assistant_original_answer":
+            payload["assistant_original_answer"] = content
+        else:
+            payload.setdefault("raw", []).append({"role": role, "content": content})
+    return payload
+
+
+def _coerce_numeric_time(value) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if value in (None, ""):
+        return None
+
+    text = str(value).strip()
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _format_thinking_time(value: float | None) -> str:
+    if value is None or value <= 0:
+        return ""
+    return f"{value:.2f}s"
 
 
 def _render_tool_history(content) -> str:
@@ -1168,7 +1276,7 @@ def _file_uri_to_path(uri: str) -> Path | None:
     return Path(path)
 
 
-def _render_markdown_block(text: str) -> str:
+def _render_markdown_block(text: str, allow_thematic_break: bool = True) -> str:
     placeholders = {}
     source = text.replace("\r\n", "\n")
 
@@ -1284,6 +1392,14 @@ def _render_markdown_block(text: str) -> str:
                 index = row_index
                 continue
 
+        if allow_thematic_break and _is_markdown_thematic_break(stripped):
+            flush_paragraph()
+            flush_list()
+            flush_blockquote()
+            html_parts.append("<hr>")
+            index += 1
+            continue
+
         heading_match = re.match(r"^(#{1,4})\s+(.*)$", stripped)
         if heading_match:
             flush_paragraph()
@@ -1343,6 +1459,11 @@ def _split_markdown_table_row(line: str) -> list[str]:
 def _is_markdown_table_row(line: str) -> bool:
     row = str(line or "").strip()
     return "|" in row and not row.startswith("#") and not row.startswith("&gt;")
+
+
+def _is_markdown_thematic_break(line: str) -> bool:
+    stripped = str(line or "").strip()
+    return re.match(r"^([-*_])(?:\s*\1){2,}$", stripped) is not None
 
 
 def _looks_like_markdown_table(header_line: str, separator_line: str) -> bool:

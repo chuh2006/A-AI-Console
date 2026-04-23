@@ -16,6 +16,56 @@ from tools.get_user import get_user_schema, get_user
 from tools.think_abstract import think_abstract_schema, think_abstract
 
 class OpenAIClient(BaseLLMClient):
+    def _stringify_content(self, content) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(content)
+
+    def _normalize_tool_call(self, tool_call: Dict) -> Dict | None:
+        if not isinstance(tool_call, dict):
+            return None
+
+        function_info = tool_call.get("function", {})
+        if not isinstance(function_info, dict):
+            function_info = {}
+
+        call_id = str(tool_call.get("id", "") or "").strip()
+        name = str(function_info.get("name") or tool_call.get("name") or "").strip()
+        arguments = function_info.get("arguments", "")
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        else:
+            arguments = self._stringify_content(arguments)
+
+        if not call_id or not name:
+            return None
+
+        return {
+            "id": call_id,
+            "type": str(tool_call.get("type") or "function"),
+            "function": {
+                "name": name,
+                "arguments": arguments,
+            },
+        }
+
+    def _normalize_tool_message(self, message: Dict) -> Dict | None:
+        if not isinstance(message, dict):
+            return None
+        call_id = str(message.get("tool_call_id", "") or "").strip()
+        if not call_id:
+            return None
+        return {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": self._stringify_content(message.get("content", "")),
+        }
+
     def sanitize_tool_call_messages(self, raw_messages: List[Dict]) -> List[Dict]:
         """清理不符合 tool-calling 协议的历史消息，避免 400 invalid_request_error。"""
         cleaned: List[Dict] = []
@@ -24,15 +74,17 @@ class OpenAIClient(BaseLLMClient):
             msg = raw_messages[idx]
             role = msg.get("role")
             if role == "assistant" and msg.get("tool_calls"):
-                expected_ids = {
-                    tc.get("id")
-                    for tc in msg.get("tool_calls", [])
-                    if isinstance(tc, dict) and tc.get("id")
-                }
+                normalized_tool_calls = [
+                    item
+                    for item in (self._normalize_tool_call(tc) for tc in msg.get("tool_calls", []))
+                    if item is not None
+                ]
+                expected_ids = {tc["id"] for tc in normalized_tool_calls}
                 # assistant 标记了 tool_calls，但没有有效 id 时，降级为普通 assistant 消息
                 if not expected_ids:
                     assistant_msg = msg.copy()
                     assistant_msg.pop("tool_calls", None)
+                    assistant_msg["content"] = self._stringify_content(assistant_msg.get("content", ""))
                     cleaned.append(assistant_msg)
                     idx += 1
                     continue
@@ -41,19 +93,23 @@ class OpenAIClient(BaseLLMClient):
                 probe = idx + 1
                 # tool 消息必须紧跟在 assistant(tool_calls) 后面
                 while probe < len(raw_messages) and raw_messages[probe].get("role") == "tool":
-                    tool_msg = raw_messages[probe]
-                    tool_call_id = tool_msg.get("tool_call_id")
+                    tool_msg = self._normalize_tool_message(raw_messages[probe])
+                    tool_call_id = tool_msg.get("tool_call_id") if tool_msg else None
                     if tool_call_id in expected_ids and tool_call_id not in found_ids:
                         collected_tool_msgs.append(tool_msg)
                         found_ids.add(tool_call_id)
                     probe += 1
                 if found_ids == expected_ids:
-                    cleaned.append(msg)
+                    assistant_msg = msg.copy()
+                    assistant_msg["content"] = self._stringify_content(assistant_msg.get("content", ""))
+                    assistant_msg["tool_calls"] = normalized_tool_calls
+                    cleaned.append(assistant_msg)
                     cleaned.extend(collected_tool_msgs)
                 else:
                     # 不完整的 tool-calls 轮次会导致后续请求报错，这里降级为普通 assistant 内容
                     assistant_msg = msg.copy()
                     assistant_msg.pop("tool_calls", None)
+                    assistant_msg["content"] = self._stringify_content(assistant_msg.get("content", ""))
                     cleaned.append(assistant_msg)
                 idx = probe
                 continue
@@ -82,6 +138,8 @@ class OpenAIClient(BaseLLMClient):
         get_user_questions = []  # 用于存储 get_user 工具调用中向用户提出的问题，以便后续分析和调试
         get_user_inputs = []  # 用于存储 get_user 工具调用中用户的输入，以便后续分析和调试
         tool_call_history: List[Dict] = []  # 用于记录所有工具调用的历史，包括工具名称、参数和返回结果，以便后续分析和调试
+        req_tool_calls: List[Dict] = []  # 存储传给模型的工具调用结果，加入到上下文中，以供模型参考，避免重复调用同一工具
+        history_messages: List[Dict] = []  # 记录本轮 assistant/tool 的真实顺序消息
 
         # test:
         if using_deepseek_agent:
@@ -145,6 +203,11 @@ class OpenAIClient(BaseLLMClient):
         status = -1 # -1: 初始状态，0: 思考，1: 正式回答
         begin_time = None
 
+        def append_history_message(message: Dict) -> None:
+            if not isinstance(message, dict):
+                return
+            history_messages.append(dict(message))
+
         # ====================================================
         # 进入多轮 Tool Calling 循环
         # ====================================================
@@ -185,14 +248,26 @@ class OpenAIClient(BaseLLMClient):
                 if getattr(delta, 'tool_calls', None):
                     for tc in delta.tool_calls:
                         idx = tc.index
+                        function_delta = getattr(tc, "function", None)
+                        call_id = getattr(tc, "id", None) or ""
+                        call_type = getattr(tc, "type", None) or "function"
+                        function_name = getattr(function_delta, "name", None) or ""
+                        function_arguments = getattr(function_delta, "arguments", None) or ""
                         if idx not in tool_calls_buffer:
                             tool_calls_buffer[idx] = {
-                                "id": tc.id, "type": "function", 
-                                "function": {"name": tc.function.name or "", "arguments": tc.function.arguments or ""}
+                                "id": call_id,
+                                "type": call_type,
+                                "function": {"name": function_name, "arguments": function_arguments}
                             }
                         else:
-                            if tc.function.name: tool_calls_buffer[idx]["function"]["name"] += tc.function.name
-                            if tc.function.arguments: tool_calls_buffer[idx]["function"]["arguments"] += tc.function.arguments
+                            if call_id:
+                                tool_calls_buffer[idx]["id"] = call_id
+                            if call_type:
+                                tool_calls_buffer[idx]["type"] = call_type
+                            if function_name:
+                                tool_calls_buffer[idx]["function"]["name"] += function_name
+                            if function_arguments:
+                                tool_calls_buffer[idx]["function"]["arguments"] += function_arguments
 
                 # 捕获思维链内容（注意：可能与 tool_calls 同时出现，不能用 elif）
                 if getattr(delta, 'reasoning_content', None):
@@ -221,7 +296,13 @@ class OpenAIClient(BaseLLMClient):
             # 检查当前轮次是否触发了工具
             # ====================================================
             if tool_calls_buffer:
-                tool_calls_list = list(tool_calls_buffer.values())
+                tool_calls_list = [
+                    item
+                    for item in (self._normalize_tool_call(tc) for tc in tool_calls_buffer.values())
+                    if item is not None
+                ]
+                if not tool_calls_list:
+                    break
                 
                 # 构建 assistant 消息并注入历史记录 (必须带上思维链)
                 assistant_msg = {
@@ -236,6 +317,7 @@ class OpenAIClient(BaseLLMClient):
                     assistant_msg["reasoning_content"] = "[empty reasoning]"
                     
                 req_messages.append(assistant_msg)
+                append_history_message(assistant_msg)
 
                 # 执行工具
                 for tc in tool_calls_list:
@@ -256,58 +338,92 @@ class OpenAIClient(BaseLLMClient):
                         yield {"type": "meta_ocr", "image_path": target_path, "ocr_text": ocr_result}
 
                         # 将执行结果作为 tool 角色追加
-                        req_messages.append({
+                        add_on = {
                             "role": "tool", 
                             "tool_call_id": tc["id"], 
                             "content": ocr_result
-                        })
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
                         tool_call_history.append({
                             "name": tc["function"]["name"],
                             "status": "success"
                         })
+                        req_tool_calls.append(add_on)
                     elif tc["function"]["name"] == "search_web":
-                        search_result = ""
-                        try:
-                            args = json.loads(tc["function"]["arguments"])
-                            queries = args.get("queries", [])
-                        except json.JSONDecodeError:
-                            queries = []
-                        if queries:
-                            yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 正在执行网络搜索，关键词: {queries}...\033[0m\n"} if not using_deepseek_agent else None
-                            search_results = search_web(queries)
-                            yield {"type": "meta", "search_keywords": queries, "uris": search_results.get("sources", [])}
-                            yield {"type": "system", "content": f"\033[93m[网络搜索返回结果]: {search_results['results'][:50]}...\033[0m\n"} if not using_deepseek_agent else None
-                        req_messages.append({
-                            "role": "tool", 
-                            "tool_call_id": tc["id"], 
-                            "content": search_results['results']
-                        })
-                        tool_call_history.append({
-                            "name": tc["function"]["name"],
-                            "status": "success"
-                        })
+                        if kwargs.get("enable_search", False) != True:
+                            search_results = {"results": "Error: 搜索功能未启用，无法执行搜索工具。请勿再次尝试调用该工具", "sources": []}
+                            tool_status = "rejected_search_disabled"
+                            add_on = {
+                                "role": "tool", 
+                                "tool_call_id": tc["id"], 
+                                "content": search_results["results"]
+                            }
+                            req_messages.append(add_on)
+                            append_history_message(add_on)
+                            req_tool_calls.append(add_on)
+                            tool_call_history.append({
+                                "name": tc["function"]["name"],
+                                "status": tool_status,
+                            })
+                        else:
+                            search_results = {"results": "Error: search_web missing valid queries argument.", "sources": []}
+                            tool_status = "invalid_arguments"
+                            try:
+                                args = json.loads(tc["function"]["arguments"])
+                                queries = args.get("queries", [])
+                            except json.JSONDecodeError:
+                                queries = []
+                            if queries:
+                                yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 正在执行网络搜索，关键词: {queries}...\033[0m\n"} if not using_deepseek_agent else None
+                                search_results = search_web(queries)
+                                tool_status = "success"
+                                yield {"type": "meta", "search_keywords": queries, "uris": search_results.get("sources", [])}
+                                yield {"type": "system", "content": f"\033[93m[网络搜索返回结果]: {search_results['results'][:50]}...\033[0m\n"} if not using_deepseek_agent else None
+                            add_on = {
+                                "role": "tool", 
+                                "tool_call_id": tc["id"], 
+                                "content": search_results['results']
+                            }
+                            req_messages.append(add_on)
+                            append_history_message(add_on)
+                            req_tool_calls.append(add_on)
+                            tool_call_history.append({
+                                "name": tc["function"]["name"],
+                                "status": tool_status
+                            })
                     elif tc["function"]["name"] == "$web_search":  # Kimi 内置搜索工具
                         arguments = json.loads(tc["function"]["arguments"])
                         tool_result = search_impl(arguments)
                         yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] Kimi 内置搜索工具\033[0m\n"}
-                        req_messages.append({
+                        add_on = {
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "name": tc["function"]["name"],
                             "content": json.dumps(tool_result["arguments"])
-                        })
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
                         tool_call_history.append({
                             "name": tc["function"]["name"],
                             "status": "success"
                         })
+                        req_tool_calls.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": json.dumps(tool_result["arguments"])
+                        })
                     elif tc["function"]["name"] == "get_time":
                         tool_result = get_time()
                         loop_count -= 1  # 时间工具不计入迭代次数限制
-                        req_messages.append({
+                        add_on = {
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": tool_result
-                        })
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
+                        req_tool_calls.append(add_on)
                         tool_call_history.append({
                             "name": tc["function"]["name"],
                             "status": "success",
@@ -318,18 +434,22 @@ class OpenAIClient(BaseLLMClient):
                         loop_count -= 1  # 获取用户输入不计入迭代次数限制
                         tool_status = "success"
                         if get_user_count >= 2:  # 限制最多向用户提出两次问题，防止过度依赖用户输入导致的死循环
-                            req_messages.append({
+                            add_on = {
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "content": "Rejected: 已达到最大向用户提问次数限制，系统强制拦截所有 get_user 工具调用。请停止尝试获取用户输入"
-                            })
+                            }
+                            req_messages.append(add_on)
+                            append_history_message(add_on)
                             tool_status = "rejected_max_count"
                         elif status == 1 and content_buffer.strip() != "":  # 如果已经有正式回答了，就不要再问用户了，防止模型在得到答案后又反过来质疑用户输入导致的死循环
-                            req_messages.append({
+                            add_on = {
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "content": "Rejected: 正式回答过程中不允许调用 get_user 工具。请停止尝试获取用户输入"
-                            })
+                            }
+                            req_messages.append(add_on)
+                            append_history_message(add_on)
                             tool_status = "rejected_no_thinking"
                         else:
                             question_str = tc["function"]["arguments"]
@@ -342,14 +462,21 @@ class OpenAIClient(BaseLLMClient):
                             get_user_questions.append(question_dict)  # 记录向用户提出的问题，以便后续分析
                             if user_response.get("result") == "success":
                                 get_user_inputs.append(user_response["user_input"])  # 保存用户输入以供后续分析
+                                req_tool_calls.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc["id"],
+                                    "content": user_response.get("user_input", "")
+                                })
                             else:
                                 get_user_inputs.append(f"用户拒绝回答问题: {question}")  # 记录用户拒绝的情况
                                 tool_status = "rejected_user_refusal"
-                            req_messages.append({
+                            add_on = {
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "content": user_response.get("user_input", "")
-                            })
+                            }
+                            req_messages.append(add_on)
+                            append_history_message(add_on)
                             tool_call_history.append({
                                 "name": tc["function"]["name"],
                                 "status": tool_status,
@@ -357,24 +484,27 @@ class OpenAIClient(BaseLLMClient):
                             
                             get_user_count += 1  # 独立计数器
 
-                    if tc["function"]["name"] == "think_abstract":
+                    elif tc["function"]["name"] == "think_abstract":
                         if status == 1 and content_buffer.strip() != "":
-                            req_messages.append({
+                            add_on = {
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "content": "Rejected: 正式回答过程中不允许调用 think_abstract 工具。请停止尝试调用该工具"
-                            })
+                            }
+                            req_messages.append(add_on)
+                            append_history_message(add_on)
                         ai_return_str = tc["function"]["arguments"]
                         ai_return_dict = think_abstract(ai_return_str)
                         yield {"type": "abstract", "content_dict": ai_return_dict}
                         loop_count -= 1  # think_abstract 工具不计入迭代次数限制
                         time.sleep(1)
-                        req_messages.append({
+                        add_on = {
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": "Success: 成功调用工具并向用户展示了思考摘要，你可继续正常思考"
-                        })
-
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
 
                     elif tc["function"]["name"] == "create_tool":
                         yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 收到创建工具请求，名称: {tc['function']['arguments']}...\033[0m\n"}
@@ -386,11 +516,13 @@ class OpenAIClient(BaseLLMClient):
                             name=name,
                             description=args.get("description")
                         )
-                        req_messages.append({
+                        add_on = {
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": tool_result.get("message", "创建工具失败")
-                        })
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
                         if tool_result.get("result") == "success":
                             # 将新工具加入可用工具列表，供后续轮次调用
                             new_tool_schema = tool_result.get("schema")
@@ -430,27 +562,33 @@ class OpenAIClient(BaseLLMClient):
                                 content += f"\n[工具执行过程输出]: {stdout}"
                                 yield {"type": "system", "content": f"\033[94m[工具 '{tc['function']['name']}' 执行过程输出]: {stdout[:50]}...\033[0m\n"}
                             tool_result = content
-                        req_messages.append({
+                        add_on = {
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": tool_result
-                        })
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
 
 
                     elif tc["function"]["name"] == "max_tool_calls_exceeded":
                         tool_result = "Error: 已达到最大工具调用次数限制，系统强制拦截所有工具调用。请停止尝试调用任何工具"
-                        req_messages.append({
+                        add_on = {
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": tool_result
-                        })
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
                     else:
                         tool_result = f"Error: Tool '{tc['function']['name']}' 不存在。请勿再次调用该工具"
-                        req_messages.append({
+                        add_on = {
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "content": tool_result
-                        })
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
 
                 # 走到这里，循环会自动继续进入下一轮 (带着包含 tool 结果的 req_messages 去重新请求大模型)
             else:
@@ -460,5 +598,9 @@ class OpenAIClient(BaseLLMClient):
             yield {"type": "meta", "assistant_questions": get_user_questions, "user_inputs": get_user_inputs}
         if tool_call_history:
             yield {"type": "meta", "tool_call_history": tool_call_history}
+        if req_tool_calls:
+            yield {"type": "meta", "tool_calls": req_tool_calls}
+        if history_messages:
+            yield {"type": "meta", "history_messages": history_messages}
 
         client.close()

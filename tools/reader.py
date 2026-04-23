@@ -3,43 +3,68 @@ import os
 import re
 
 
+def _resolve_history_path(file_name: str) -> str:
+    safe_name = os.path.basename(str(file_name or "").strip())
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    chat_result_dir = os.path.join(parent_dir, "chat_result")
+    chat_result_json_dir = os.path.join(chat_result_dir, "json")
+
+    stem, suffix = os.path.splitext(safe_name)
+    suffix = suffix.lower()
+    candidates: list[str] = []
+
+    if suffix == ".html":
+        candidates.extend(
+            [
+                os.path.join(chat_result_json_dir, f"{stem}.json"),
+                os.path.join(chat_result_dir, f"{stem}.json"),
+                os.path.join(chat_result_dir, safe_name),
+            ]
+        )
+    elif suffix == ".json":
+        candidates.extend(
+            [
+                os.path.join(chat_result_json_dir, safe_name),
+                os.path.join(chat_result_dir, safe_name),
+            ]
+        )
+    elif suffix == ".md":
+        candidates.append(os.path.join(chat_result_dir, safe_name))
+    else:
+        candidates.extend(
+            [
+                os.path.join(chat_result_json_dir, f"{safe_name}.json"),
+                os.path.join(chat_result_dir, f"{safe_name}.json"),
+                os.path.join(chat_result_dir, f"{safe_name}.html"),
+                os.path.join(chat_result_dir, f"{safe_name}.md"),
+            ]
+        )
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    return candidates[0] if candidates else os.path.join(chat_result_dir, safe_name)
+
+
 def read_from_history(file_name: str) -> tuple[list[dict], float, list[dict]]:
     """
     读取会话历史文件。
-
     Args:
         file_name: 要读取的历史文件名（位于 chat_result 目录下）
 
     Returns:
         (对话列表, temperature 值, 完整历史)
     """
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    chat_result_dir = os.path.join(parent_dir, "chat_result")
-    file_path = os.path.join(chat_result_dir, file_name)
-
-    if file_path.lower().endswith(".html"):
-        paired_json_path = os.path.splitext(file_path)[0] + ".json"
-        if os.path.exists(paired_json_path):
-            file_path = paired_json_path
-
-    if not os.path.exists(file_path) and not os.path.splitext(file_name)[1]:
-        json_path = os.path.join(chat_result_dir, f"{file_name}.json")
-        html_path = os.path.join(chat_result_dir, f"{file_name}.html")
-        md_path = os.path.join(chat_result_dir, f"{file_name}.md")
-        if os.path.exists(json_path):
-            file_path = json_path
-        elif os.path.exists(html_path):
-            paired_json_path = os.path.splitext(html_path)[0] + ".json"
-            file_path = paired_json_path if os.path.exists(paired_json_path) else html_path
-        elif os.path.exists(md_path):
-            file_path = md_path
+    safe_name = os.path.basename(str(file_name or "").strip())
+    file_path = _resolve_history_path(safe_name)
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
     except FileNotFoundError:
-        print(f"文件 {file_name} 未找到。请确保文件存在于 chat_result 目录下。")
+        print(f"文件 {safe_name} 未找到，请确认它位于 chat_result 目录下。")
         return read_from_history(input("请输入正确的文件名: "))
 
     if file_path.lower().endswith(".json"):
@@ -63,20 +88,16 @@ def _read_from_json(content: str) -> tuple[list[dict], float, list[dict]]:
         role = item.get("role")
         text = item.get("content", "")
 
-        if role == "system":
-            messages.append({
-                "role": "system",
-                "content": text
-            })
-        elif role == "user":
-            messages.append({
-                "role": "user",
-                "content": text
-            })
+        if role in {"system", "user", "assistant", "tool"}:
+            messages.append(dict(item))
+        elif role == "assistant_tool_calls":
+            assistant_record = dict(item)
+            assistant_record["role"] = "assistant"
+            messages.append(assistant_record)
         elif role == "assistant_answer":
             messages.append({
                 "role": "assistant",
-                "content": text
+                "content": text,
             })
         elif role == "temperature":
             try:
@@ -105,13 +126,13 @@ def _read_from_markdown(content: str) -> tuple[list[dict], float, list[dict]]:
 
         full_history.append({
             "role": role_name,
-            "content": text
+            "content": text,
         })
 
         if title == "system:":
             messages.append({
                 "role": "system",
-                "content": text
+                "content": text,
             })
         elif title == "user:":
             text_processed = text
@@ -119,12 +140,27 @@ def _read_from_markdown(content: str) -> tuple[list[dict], float, list[dict]]:
                 text_processed = text_processed[3:-3].strip()
             messages.append({
                 "role": "user",
-                "content": text_processed
+                "content": text_processed,
+            })
+        elif title == "assistant:":
+            messages.append({
+                "role": "assistant",
+                "content": text,
+            })
+        elif title == "tool:":
+            messages.append({
+                "role": "tool",
+                "content": text,
             })
         elif title == "assistant_answer:":
             messages.append({
                 "role": "assistant",
-                "content": text
+                "content": text,
+            })
+        elif title == "assistant_tool_calls:":
+            messages.append({
+                "role": "assistant",
+                "content": text,
             })
         elif title == "temperature:":
             try:
