@@ -80,6 +80,7 @@ def _read_from_json(content: str) -> tuple[list[dict], float, list[dict]]:
 
     messages = []
     temperature = 1.0
+    pending_assistant_reasoning = ""
 
     for item in full_history:
         if not isinstance(item, dict):
@@ -88,17 +89,46 @@ def _read_from_json(content: str) -> tuple[list[dict], float, list[dict]]:
         role = item.get("role")
         text = item.get("content", "")
 
+        if role == "assistant_thinking":
+            thinking_text = str(text or "")
+            if thinking_text:
+                pending_assistant_reasoning += thinking_text
+            continue
+
         if role in {"system", "user", "assistant", "tool"}:
-            messages.append(dict(item))
+            record = dict(item)
+            if role == "assistant":
+                reasoning_content = record.get("reasoning_content", "")
+                if str(reasoning_content or "").strip():
+                    record["reasoning_content"] = reasoning_content
+                elif pending_assistant_reasoning.strip():
+                    record["reasoning_content"] = pending_assistant_reasoning
+                pending_assistant_reasoning = ""
+            elif role in {"system", "user"}:
+                pending_assistant_reasoning = ""
+            messages.append(record)
         elif role == "assistant_tool_calls":
             assistant_record = dict(item)
             assistant_record["role"] = "assistant"
+            reasoning_content = assistant_record.get("reasoning_content", "")
+            if str(reasoning_content or "").strip():
+                assistant_record["reasoning_content"] = reasoning_content
+            elif pending_assistant_reasoning.strip():
+                assistant_record["reasoning_content"] = pending_assistant_reasoning
+            pending_assistant_reasoning = ""
             messages.append(assistant_record)
         elif role == "assistant_answer":
-            messages.append({
+            assistant_record = {
                 "role": "assistant",
                 "content": text,
-            })
+            }
+            reasoning_content = item.get("reasoning_content", "")
+            if str(reasoning_content or "").strip():
+                assistant_record["reasoning_content"] = reasoning_content
+            elif pending_assistant_reasoning.strip():
+                assistant_record["reasoning_content"] = pending_assistant_reasoning
+            pending_assistant_reasoning = ""
+            messages.append(assistant_record)
         elif role == "temperature":
             try:
                 temperature = float(text)

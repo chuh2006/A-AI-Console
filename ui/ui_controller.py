@@ -34,9 +34,9 @@ class UIController:
         self.model_map = {
             "0": "自己回答",
             "1": "deepseek-agent-preview",
-            "2": "deepseek",
-            "3": "multi-assistant-old-preview",
-            "4": "帮我选择",
+            "2": "deepseek-v4-flash",
+            "3": "deepseek-v4-pro",
+            "4": "multi-assistant-old-preview",
             "5": "错误消息",
             "6": "math-model",
             "7": "gemini-3.1-flash-lite-preview",
@@ -52,7 +52,9 @@ class UIController:
             "17": "doubao-seed-1-6-flash-250828",
             "18": "kimi-k2.5",
             "19": "MiniMax-M2.7",
-            "20": "MiniMax-M2.5"
+            "20": "MiniMax-M2.5",
+            "21": "doubao-seedream-5-0-260128",
+            "22": "doubao-seedream-4-5-251128"
             }
 
     def get_user_input(self, prompt: str = "请输入文本：", empty_choice: str = None) -> str:
@@ -606,6 +608,37 @@ class UIController:
                     "image_path": chunk["image_path"],
                     "ocr_text": chunk["ocr_text"]
                 })
+            elif chunk_type == "image_placeholder":
+                _flush_thinking_footer(show_transition=False)
+                _ensure_line_break()
+                try:
+                    placeholder_count = int(chunk.get("count", 1) or 1)
+                except (TypeError, ValueError):
+                    placeholder_count = 1
+                print(f"\033[94m[S] 正在生成图片，共 {placeholder_count} 张...\033[0m")
+                last_output_ended_with_newline = True
+            elif chunk_type == "image_generated":
+                _flush_thinking_footer(show_transition=False)
+                _ensure_line_break()
+                image_path = str(chunk.get("image_path", "") or "")
+                size_text = str(chunk.get("size", "") or "")
+                try:
+                    image_index = int(chunk.get("index", 0) or 0) + 1
+                except (TypeError, ValueError):
+                    image_index = 1
+                suffix = f" ({size_text})" if size_text else ""
+                print(f"\033[94m[S] 第 {image_index} 张图片已保存: {image_path}{suffix}\033[0m")
+                last_output_ended_with_newline = True
+            elif chunk_type == "image_failed":
+                _flush_thinking_footer(show_transition=False)
+                _ensure_line_break()
+                try:
+                    image_index = int(chunk.get("index", 0) or 0) + 1
+                except (TypeError, ValueError):
+                    image_index = 1
+                error_text = str(chunk.get("error", "") or "图片保存失败")
+                print(f"\033[93m[W] 第 {image_index} 张图片处理失败: {error_text}\033[0m")
+                last_output_ended_with_newline = True
             elif chunk_type == "thinking":
                 if not is_thinking:
                     _ensure_line_break()
@@ -627,12 +660,12 @@ class UIController:
                     meta_info["thinking_time"] = float(thinking_time)
                     meta_info["thinking_times"].append(float(thinking_time))
 
-                for list_key in ("uris", "search_keywords", "assistant_questions", "user_inputs", "tool_call_history"):
+                for list_key in ("uris", "search_keywords", "assistant_questions", "user_inputs", "tool_call_history", "generated_images", "image_failures"):
                     if list_key in chunk:
                         _append_unique_meta_items(list_key, chunk.get(list_key))
 
                 for key, value in chunk.items():
-                    if key in {"type", "thinking_time", "uris", "search_keywords", "assistant_questions", "user_inputs", "tool_call_history"}:
+                    if key in {"type", "thinking_time", "uris", "search_keywords", "assistant_questions", "user_inputs", "tool_call_history", "generated_images", "image_failures"}:
                         continue
                     meta_info[key] = value
             elif chunk_type == "system":

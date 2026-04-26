@@ -210,21 +210,55 @@ def main(ui: UIController = None):
                             extra_kwargs["search_strategy"] = ui.get_num_choice_input("请设置设置搜索量级策略", {"1": "turbo", "2": "max", "3": "agent", "4": "agent_max"})
                         extra_kwargs["isQwenThinking"] = ui.get_en_or_disable_or_auto_input("是否启用Qwen思考功能？(启用后会整体提高回答质量，但是对用户强制纠正或者未知答案的问题容易陷入死循环，不建议开启。或者说千问这个模型本身就不建议使用。)\n请输入文本")
                     elif "doubao" in model_name:
-                        extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
-                        extra_kwargs["reasoningEffort"] = ui.get_num_choice_input("请选择思考深度(minimal为关闭思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"})
+                        if "seedream" in model_name:
+                            extra_kwargs["enable_image_thinking"] = ui.get_boolean_input("是否显示前序概括？", default=True)
+                            batch_mode = ui.get_boolean_input("是否生成组图？", default=False)
+                            if batch_mode:
+                                extra_kwargs["sequential_image_generation"] = "auto"
+                                batch_count = ui.get_num_choice_input(
+                                    "请选择组图数量：",
+                                    {"1": "2", "2": "4", "3": "6", "4": "8"},
+                                )
+                                extra_kwargs["sequential_image_generation_options"] = {
+                                    "max_images": int(batch_count)
+                                }
+                            if model_name == "doubao-seedream-5-0-260128":
+                                extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
+                                resolution_choice = ui.get_num_choice_input(
+                                    "请选择分辨率：",
+                                    {"1": "2K", "2": "3K", "3": "custom"},
+                                )
+                                if resolution_choice == "custom":
+                                    extra_kwargs["resolution"] = ui.get_user_input("请输入分辨率（如 2048x1536）：")
+                                else:
+                                    extra_kwargs["resolution"] = resolution_choice
+                                extra_kwargs["output_format"] = ui.get_num_choice_input(
+                                    "请选择输出格式：",
+                                    {"1": "png", "2": "jpeg", "3": "webp"},
+                                )
+                            elif model_name == "doubao-seedream-4-5-251128":
+                                resolution_choice = ui.get_num_choice_input(
+                                    "请选择分辨率：",
+                                    {"1": "2K", "2": "4K", "3": "custom"},
+                                )
+                                if resolution_choice == "custom":
+                                    extra_kwargs["resolution"] = ui.get_user_input("请输入分辨率（如 2048x1536）：")
+                                else:
+                                    extra_kwargs["resolution"] = resolution_choice
+                        else:
+                            extra_kwargs["enable_search"] = ui.get_boolean_input("是否启用联网搜索？")
+                            extra_kwargs["reasoningEffort"] = ui.get_num_choice_input("请选择思考深度(minimal为关闭思考)：", {"0": "minimal", "1": "low", "2": "medium", "3": "high"})
                     elif "deepseek" in model_name:
                         if "deepseek-agent" in model_name:
-                            new_model_name = "deepseek-reasoner"
+                            new_model_name = "deepseek-v4-pro"
                             extra_kwargs["enable_agent"] = True
                             if ui.get_boolean_input("是否启用交互式思考？", default=False):
                                 extra_kwargs["enable_enhanced_thinking"] = True
-                        elif model_name not in {"deepseek-chat", "deepseek-reasoner"}:
-                            if ui.get_boolean_input("是否启用DeepSeek思考", default=True):
-                                new_model_name = "deepseek-reasoner"
-                                if ui.get_boolean_input("是否启用交互式思考", default=False):
-                                    extra_kwargs["enable_enhanced_thinking"] = True
-                            else:
-                                new_model_name = "deepseek-chat"
+                        else:
+                            if ui.get_boolean_input("是否启用思考功能？", default=True):
+                                extra_kwargs["enable_thinking"] = True
+                                extra_kwargs["reasoningEffort"] = ui.get_num_choice_input_num("请选择思考深度", {"1": "standard", "2": "enhance"})
+                                extra_kwargs["enable_enhanced_thinking"] = ui.get_boolean_input("是否启用交互式思考？", default=False)
                         if ui.get_boolean_input("是否启用联网搜索？", default=True if "agent" in model_name else False):
                             extra_kwargs["enable_search"] = True
                             extra_kwargs["searchEffort"] = ui.get_num_choice_input("请选择搜索量级", {"0": "time_only", "1": "minimal", "2": "low", "3": "medium", "4": "high", "5": "max", "6": "unlimited"}) if "reasoner" in new_model_name else "minimal"
@@ -302,6 +336,18 @@ def main(ui: UIController = None):
                 final_answer = spawnRandomContext(answer, random_ctx_ans)
 
             # 2.7 记录助手最终回答到 Session
+            generated_images = [
+                str(path).strip()
+                for path in meta.get("generated_images", [])
+                if str(path or "").strip()
+            ]
+            if generated_images:
+                image_markdown = "\n\n".join(
+                    f"![Generated Image {index + 1}]({path})"
+                    for index, path in enumerate(generated_images)
+                )
+                final_answer = f"{final_answer.rstrip()}\n\n{image_markdown}" if final_answer.strip() else image_markdown
+
             session.add_assistant_message(
                 content=final_answer, 
                 original_content=answer if is_a_random else None,

@@ -66,7 +66,107 @@ class OpenAIClient(BaseLLMClient):
             "content": self._stringify_content(message.get("content", "")),
         }
 
-    def sanitize_tool_call_messages(self, raw_messages: List[Dict]) -> List[Dict]:
+    def _coerce_reasoning_text(self, value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, dict):
+                    text = self._coerce_reasoning_text(
+                        item.get("text")
+                        or item.get("content")
+                        or item.get("reasoning_content")
+                        or item.get("reasoning")
+                    )
+                else:
+                    text = self._coerce_reasoning_text(item)
+                if text:
+                    parts.append(text)
+            if parts:
+                return "".join(parts)
+            return self._stringify_content(value)
+
+        if isinstance(value, dict):
+            for key in ("text", "content", "reasoning_content", "reasoning"):
+                text = self._coerce_reasoning_text(value.get(key))
+                if text:
+                    return text
+            return self._stringify_content(value)
+
+        return self._stringify_content(value)
+
+    def _extract_reasoning_candidate(self, source, depth: int = 0) -> str:
+        if source is None or depth > 4:
+            return ""
+
+        if isinstance(source, dict):
+            for key in ("reasoning_content", "reasoning"):
+                text = self._coerce_reasoning_text(source.get(key))
+                if text.strip():
+                    return text
+            for key in ("model_extra", "message", "delta"):
+                text = self._extract_reasoning_candidate(source.get(key), depth + 1)
+                if text.strip():
+                    return text
+            return ""
+
+        for attr_name in ("reasoning_content", "reasoning"):
+            text = self._coerce_reasoning_text(getattr(source, attr_name, None))
+            if text.strip():
+                return text
+
+        for attr_name in ("model_extra", "message", "delta"):
+            text = self._extract_reasoning_candidate(getattr(source, attr_name, None), depth + 1)
+            if text.strip():
+                return text
+
+        to_dict_fn = getattr(source, "to_dict", None)
+        if callable(to_dict_fn):
+            try:
+                text = self._extract_reasoning_candidate(to_dict_fn(), depth + 1)
+                if text.strip():
+                    return text
+            except Exception:
+                pass
+
+        return ""
+
+    def _extract_reasoning_delta(self, delta) -> str:
+        return self._extract_reasoning_candidate(delta)
+
+    def _extract_reasoning_snapshot(self, choice) -> str:
+        return self._extract_reasoning_candidate(choice)
+
+    def _requires_strict_tool_reasoning_content(self) -> bool:
+        return "deepseek" in self.model_name
+
+    def _should_backfill_tool_reasoning_content(self, *, force: bool = False) -> bool:
+        # 仅在显式强制（如 Kimi thinking）时使用占位符补齐。
+        return force
+
+    def _ensure_tool_reasoning_content(self, message: Dict, *, force: bool = False) -> None:
+        if not isinstance(message, dict) or not message.get("tool_calls"):
+            return
+
+        reasoning_content = self._coerce_reasoning_text(message.get("reasoning_content", ""))
+        if reasoning_content.strip():
+            if message.get("reasoning_content") != reasoning_content:
+                message["reasoning_content"] = reasoning_content
+            return
+
+        if self._should_backfill_tool_reasoning_content(force=force):
+            message["reasoning_content"] = "[empty reasoning]"
+
+    def sanitize_tool_call_messages(
+        self,
+        raw_messages: List[Dict],
+        *,
+        force_tool_reasoning_content: bool = False,
+    ) -> List[Dict]:
         """清理不符合 tool-calling 协议的历史消息，避免 400 invalid_request_error。"""
         cleaned: List[Dict] = []
         idx = 0
@@ -103,6 +203,23 @@ class OpenAIClient(BaseLLMClient):
                     assistant_msg = msg.copy()
                     assistant_msg["content"] = self._stringify_content(assistant_msg.get("content", ""))
                     assistant_msg["tool_calls"] = normalized_tool_calls
+
+                    reasoning_content = self._coerce_reasoning_text(assistant_msg.get("reasoning_content", ""))
+                    if reasoning_content.strip():
+                        assistant_msg["reasoning_content"] = reasoning_content
+                    elif self._requires_strict_tool_reasoning_content():
+                        # DeepSeek 官方要求：tool round 必须回传完整 reasoning_content。
+                        # 若历史缺失该字段，降级为普通 assistant 消息，避免后续请求触发 400。
+                        assistant_msg.pop("tool_calls", None)
+                        assistant_msg.pop("reasoning_content", None)
+                        cleaned.append(assistant_msg)
+                        idx = probe
+                        continue
+
+                    self._ensure_tool_reasoning_content(
+                        assistant_msg,
+                        force=force_tool_reasoning_content,
+                    )
                     cleaned.append(assistant_msg)
                     cleaned.extend(collected_tool_msgs)
                 else:
@@ -124,7 +241,6 @@ class OpenAIClient(BaseLLMClient):
     def chat_stream(self, messages: List[Dict[str, str | list]], temperature: float, image_paths: List[str] = None, **kwargs) -> Generator[Dict[str, str], None, None]:
         client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         using_kimi = "kimi" in self.model_name
-        using_deepseek_reasoner = "reasoner" in self.model_name
         using_deepseek = "deepseek" in self.model_name
         using_deepseek_agent = kwargs.get("enable_agent", False) and using_deepseek
 
@@ -140,6 +256,8 @@ class OpenAIClient(BaseLLMClient):
         tool_call_history: List[Dict] = []  # 用于记录所有工具调用的历史，包括工具名称、参数和返回结果，以便后续分析和调试
         req_tool_calls: List[Dict] = []  # 存储传给模型的工具调用结果，加入到上下文中，以供模型参考，避免重复调用同一工具
         history_messages: List[Dict] = []  # 记录本轮 assistant/tool 的真实顺序消息
+        reasoning_effort_dict = {"1": "high", "2": "max"} # deepseek-v4 的思考深度
+        reasoning_effort = "high" # 默认思考深度
 
         # test:
         if using_deepseek_agent:
@@ -156,6 +274,9 @@ class OpenAIClient(BaseLLMClient):
                 tools.append(ocr_tool_schema)
             if kwargs.get("enable_enhanced_thinking", False):
                 tools.append(get_user_schema)
+            if kwargs.get("enable_thinking", False):
+                extra_body["thinking"] = {"type": "enabled"}
+                reasoning_effort = reasoning_effort_dict.get(kwargs.get("reasoningEffort"), "high")
 
         if using_kimi:
             if "kimi-k2.5" in self.model_name:
@@ -215,7 +336,10 @@ class OpenAIClient(BaseLLMClient):
             loop_count += 1
             begin_time = time.time()
 
-            req_messages = self.sanitize_tool_call_messages(req_messages)
+            req_messages = self.sanitize_tool_call_messages(
+                req_messages,
+                force_tool_reasoning_content=kimi_thinking_enabled,
+            )
 
             if kimi_thinking_enabled:
                 for msg in req_messages:
@@ -229,7 +353,8 @@ class OpenAIClient(BaseLLMClient):
                 temperature=temperature,
                 stream=True,
                 extra_body=extra_body,
-                tools=tools if tools else None
+                tools=tools if tools else None,
+                reasoning_effort=reasoning_effort if using_deepseek else None
             )
             
             # 初始化当前轮次的缓存
@@ -243,6 +368,7 @@ class OpenAIClient(BaseLLMClient):
             for chunk in stream:
                 if not chunk.choices: continue
                 delta = chunk.choices[0].delta
+                choice = chunk.choices[0]
                 
                 # 捕获 function calls
                 if getattr(delta, 'tool_calls', None):
@@ -270,14 +396,25 @@ class OpenAIClient(BaseLLMClient):
                                 tool_calls_buffer[idx]["function"]["arguments"] += function_arguments
 
                 # 捕获思维链内容（注意：可能与 tool_calls 同时出现，不能用 elif）
-                if getattr(delta, 'reasoning_content', None):
+                reasoning_delta = self._extract_reasoning_delta(delta)
+                if reasoning_delta:
                     status = 0
-                    reasoning_buffer += delta.reasoning_content
+                    reasoning_buffer += reasoning_delta
                     isThinkingTime = True
                     if not using_deepseek_agent:
-                        yield {"type": "thinking", "content": delta.reasoning_content}
+                        yield {"type": "thinking", "content": reasoning_delta}
                     else:
-                        yield {"type": "thinking", "content": delta.reasoning_content, "display": False}
+                        yield {"type": "thinking", "content": reasoning_delta, "display": False}
+                elif not reasoning_buffer:
+                    reasoning_snapshot = self._extract_reasoning_snapshot(choice)
+                    if reasoning_snapshot:
+                        status = 0
+                        reasoning_buffer = reasoning_snapshot
+                        isThinkingTime = True
+                        if not using_deepseek_agent:
+                            yield {"type": "thinking", "content": reasoning_snapshot}
+                        else:
+                            yield {"type": "thinking", "content": reasoning_snapshot, "display": False}
 
                 # 捕获常规回复内容
                 if getattr(delta, 'content', None):
@@ -316,6 +453,12 @@ class OpenAIClient(BaseLLMClient):
                     # Kimi 在开启 thinking 且发生 tool call 时，要求 assistant 消息显式带 reasoning_content 字段
                     assistant_msg["reasoning_content"] = "[empty reasoning]"
                     
+                if "reasoning_content" not in assistant_msg:
+                    self._ensure_tool_reasoning_content(
+                        assistant_msg,
+                        force=kimi_thinking_enabled,
+                    )
+
                 req_messages.append(assistant_msg)
                 append_history_message(assistant_msg)
 
@@ -351,8 +494,8 @@ class OpenAIClient(BaseLLMClient):
                         })
                         req_tool_calls.append(add_on)
                     elif tc["function"]["name"] == "search_web":
-                        if kwargs.get("enable_search", False) != True:
-                            search_results = {"results": "Error: 搜索功能未启用，无法执行搜索工具。请勿再次尝试调用该工具", "sources": []}
+                        if kwargs.get("searchEffort", "time_only") == "time_only":
+                            search_results = {"results": "Error: 搜索功能未被用户启用，无法执行搜索。本轮请勿再次尝试调用该工具", "sources": []}
                             tool_status = "rejected_search_disabled"
                             add_on = {
                                 "role": "tool", 

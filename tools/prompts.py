@@ -1,4 +1,10 @@
 from datetime import datetime
+try:
+    from tools.system import system
+    system += f"\nThe current time is {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. Note: the current time **is not** your training data cutoff date, **nor is it** a hypothetical setting for the current conversation, but rather a description of the current real time at the moment the conversation starts, obtained using `datetime.now()`. There is no time travel, and no fabrication, just a description of a point in time."
+except ImportError:
+    print("[W] 未找到 tools/system.py，使用默认的系统提示词。")
+    system = f"你是一个有帮助的助手。你需要尽量完成用户的请求。使用简体中文回答用户。现在时间是{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}。注意：当前时间**不是**你的数据库截止日期，**更不是**当前对话的假设的设定，而是对话开启时用户所在的当前真实时间，是使用`datetime.now()`获取的时间。没有穿越时空，更没有编造，仅仅是一个时间点的描述。"
 
 class Prompts:
     parallel_sub_task_prompt = "你是一个AI工作集群中的子任务并行处理模型，你的任务是根据用户提供的prompt，生成对应的高质量回复。请确保你的回复内容准确且详尽。"
@@ -39,7 +45,7 @@ class Prompts:
     
     progressive_task_prompt = "你是一个AI工作集群中的子任务递进处理模型，你的任务是根据用户提供的prompt，结合上游任务的回答，生成对应的高质量回复。请确保你的回复内容准确且详尽。"
     
-    universe_task_prompt = f"你是一个有帮助的助手。你需要尽量完成用户的请求。使用简体中文回答用户。现在时间是{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}。注意：当前时间**不是**你的数据库截止日期，**更不是**当前对话的假设的设定，而是对话开启时用户所在的当前真实时间，是使用`datetime.now()`获取的时间。没有穿越时空，更没有编造，仅仅是一个时间点的描述。"
+    universe_task_prompt = system
 
     auto_asker_system_prompt = "现在假如你是用户，用户是AI助理。你有问题需要解决，你需要向用户请教。你需要持续提问，和用户进行多轮对话交流，直到问题彻底解决，然后你可以提出相关的新问题。请注意用中文提问，其他语言用户可能无法理解。你要始终记住你的身份，不要做无关的事。你的任务只有向用户寻求解决方案，不允许尝试自己回答自己的问题，系统会检测你的行为，若你尝试为自己的问题提供解决方案，对话会强行停止。"
 

@@ -52,7 +52,13 @@ class ChatSession:
     def add_epoch_count(self, epoch: int):
         self.full_context.append({"role": "epoch_count", "content": str(epoch)})
 
-    def add_user_message(self, content: str, original_text: str = None, images: list = None):
+    def add_user_message(
+        self,
+        content: str,
+        original_text: str = None,
+        images: list = None,
+        current_time: str = None,
+    ):
         if images:
             self.full_context.append({"role": "image_uploaded", "content": list(images)})
         if original_text and original_text != content:
@@ -60,6 +66,8 @@ class ChatSession:
 
         self.history.append({"role": "user", "content": content})
         self.full_context.append({"role": "user", "content": content})
+        if current_time:
+            self.full_context.append({"role": "current_time", "content": str(current_time)})
         self._auto_clean_context()
 
     def add_enabled_tools(self, tools: list[str]):
@@ -107,7 +115,12 @@ class ChatSession:
                 tool_record = dict(tool_call)
                 tool_messages.append(tool_record)
                 self.history.append(dict(tool_record))
-        self.history.append({"role": "assistant", "content": content})
+
+        assistant_history_record = {"role": "assistant", "content": content}
+        reasoning_content = str(thinking or "")
+        if reasoning_content.strip():
+            assistant_history_record["reasoning_content"] = reasoning_content
+        self.history.append(assistant_history_record)
 
         if model_name:
             self.full_context.append({"role": "model", "content": model_name})
@@ -153,7 +166,10 @@ class ChatSession:
         if original_content and original_content != content:
             self.full_context.append({"role": "assistant_original_answer", "content": original_content})
 
-        self.full_context.append({"role": "assistant_answer", "content": content})
+        assistant_answer_record = {"role": "assistant_answer", "content": content}
+        if reasoning_content.strip():
+            assistant_answer_record["reasoning_content"] = reasoning_content
+        self.full_context.append(assistant_answer_record)
         self._auto_clean_context()
 
     def _append_ordered_assistant_message(
@@ -165,6 +181,8 @@ class ChatSession:
     ) -> None:
         if model_name:
             self.full_context.append({"role": "model", "content": model_name})
+
+        latest_thinking_text = ""
 
         pending_history = [
             dict(message)
@@ -180,6 +198,9 @@ class ChatSession:
             if kind == "thinking":
                 thinking_text = str(raw_block.get("content", "") or "")
                 block_record = {"role": "assistant_thinking", "content": thinking_text}
+
+                if thinking_text:
+                    latest_thinking_text += thinking_text
 
                 thinking_time = raw_block.get("thinking_time")
                 if isinstance(thinking_time, (int, float)) and thinking_time > 0:
@@ -215,21 +236,38 @@ class ChatSession:
             answer_text = str(raw_block.get("content", "") or "")
             matched_round = self._consume_matching_tool_round(pending_history, answer_text)
             if matched_round is not None:
+                history_assistant = dict(matched_round["assistant"])
+                history_assistant["role"] = "assistant"
+                self.history.append(history_assistant)
+                for tool_message in matched_round["tools"]:
+                    self.history.append(dict(tool_message))
                 self.full_context.append(matched_round["assistant"])
                 self.full_context.extend(matched_round["tools"])
+                latest_thinking_text = ""
                 continue
 
             if answer_text:
-                self.full_context.append({"role": "assistant_answer", "content": answer_text})
+                history_record = {"role": "assistant", "content": answer_text}
+                if latest_thinking_text.strip():
+                    history_record["reasoning_content"] = latest_thinking_text
+                self.history.append(history_record)
+                answer_record = {"role": "assistant_answer", "content": answer_text}
+                if latest_thinking_text.strip():
+                    answer_record["reasoning_content"] = latest_thinking_text
+                self.full_context.append(answer_record)
+            latest_thinking_text = ""
 
         self._append_pending_empty_tool_rounds(pending_history)
         while pending_history:
             leftover = pending_history.pop(0)
             if str(leftover.get("role", "")).strip() == "assistant" and leftover.get("tool_calls"):
+                self.history.append(dict(leftover))
                 stored = dict(leftover)
                 stored["role"] = "assistant_tool_calls"
                 self.full_context.append(stored)
                 continue
+            if str(leftover.get("role", "")).strip() in {"assistant", "tool"}:
+                self.history.append(dict(leftover))
             self.full_context.append(dict(leftover))
 
     def _append_pending_empty_tool_rounds(self, pending_history: list[dict]) -> None:
@@ -237,6 +275,11 @@ class ChatSession:
             next_round = self._consume_matching_tool_round(pending_history, "")
             if next_round is None:
                 return
+            history_assistant = dict(next_round["assistant"])
+            history_assistant["role"] = "assistant"
+            self.history.append(history_assistant)
+            for tool_message in next_round["tools"]:
+                self.history.append(dict(tool_message))
             self.full_context.append(next_round["assistant"])
             self.full_context.extend(next_round["tools"])
 
@@ -312,7 +355,7 @@ class ChatSession:
             self.full_context = self.full_context[:rollback_start]
             return
 
-        rollback_roles = {"user", "user_original", "image_uploaded", "enabled_tools"}
+        rollback_roles = {"user", "user_original", "image_uploaded", "enabled_tools", "current_time"}
         while self.full_context:
             tail = self.full_context[-1]
             role = str(tail.get("role", "")) if isinstance(tail, dict) else ""
@@ -369,6 +412,9 @@ class ChatSession:
                 current_last_user = str(message.get("content", ""))
                 continue
 
+            if role == "current_time":
+                continue
+
             if current_start is None:
                 current_start = pending_start if pending_start is not None else idx
                 pending_start = None
@@ -397,6 +443,7 @@ class ChatSession:
 
     def _rebuild_history_from_full_context(self):
         rebuilt_history = []
+        pending_assistant_reasoning = ""
 
         for message in self.full_context:
             if not isinstance(message, dict):
@@ -404,14 +451,43 @@ class ChatSession:
 
             role = str(message.get("role", ""))
             content = message.get("content", "")
+            if role == "assistant_thinking":
+                thinking_text = str(content or "")
+                if thinking_text:
+                    pending_assistant_reasoning += thinking_text
+                continue
+
             if role in self._HISTORY_ROLES:
-                rebuilt_history.append(dict(message))
+                record = dict(message)
+                if role == "assistant":
+                    reasoning_content = record.get("reasoning_content", "")
+                    if str(reasoning_content or "").strip():
+                        record["reasoning_content"] = reasoning_content
+                    elif pending_assistant_reasoning.strip():
+                        record["reasoning_content"] = pending_assistant_reasoning
+                    pending_assistant_reasoning = ""
+                elif role in {"user", "system"}:
+                    pending_assistant_reasoning = ""
+                rebuilt_history.append(record)
             elif role == "assistant_tool_calls":
                 assistant_record = dict(message)
                 assistant_record["role"] = "assistant"
+                reasoning_content = assistant_record.get("reasoning_content", "")
+                if str(reasoning_content or "").strip():
+                    assistant_record["reasoning_content"] = reasoning_content
+                elif pending_assistant_reasoning.strip():
+                    assistant_record["reasoning_content"] = pending_assistant_reasoning
+                pending_assistant_reasoning = ""
                 rebuilt_history.append(assistant_record)
             elif role == "assistant_answer":
-                rebuilt_history.append({"role": "assistant", "content": content})
+                assistant_record = {"role": "assistant", "content": content}
+                reasoning_content = message.get("reasoning_content", "")
+                if str(reasoning_content or "").strip():
+                    assistant_record["reasoning_content"] = reasoning_content
+                elif pending_assistant_reasoning.strip():
+                    assistant_record["reasoning_content"] = pending_assistant_reasoning
+                pending_assistant_reasoning = ""
+                rebuilt_history.append(assistant_record)
 
         self.history = rebuilt_history
 
@@ -426,6 +502,9 @@ class ChatSession:
         for msg in messages:
             for char in str(msg.get("content", "")):
                 count += 0.6 if ord(char) > 127 else 0.3
+            if msg.get("tool_calls"):
+                for char in str(msg.get("reasoning_content", "")):
+                    count += 0.6 if ord(char) > 127 else 0.3
         return int(count)
 
     def _calc_token_count(self) -> int:

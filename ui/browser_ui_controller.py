@@ -24,6 +24,7 @@ from core.llm_factory import LLMFactory
 from core.session import ChatSession
 from tools.chat_archive_renderer import (
     _build_render_structure,
+    _format_conversation_timestamp,
     _render_assistant_blocks,
     _render_markdown_block,
     _render_turn,
@@ -35,6 +36,10 @@ from ui.browser_mode import BrowserCSSMixin, BrowserIndexPageMixin, BrowserJSMix
 
 class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin):
     IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+    IMAGE_MODEL_IDS = {
+        "doubao-seedream-5-0-260128",
+        "doubao-seedream-4-5-251128",
+    }
     THEME_OPTIONS = [
         {"id": "orange", "label": "橙色", "swatch": "#d97757"},
         {"id": "green", "label": "绿色", "swatch": "#2d8a63"},
@@ -62,8 +67,8 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         self.default_temperature = settings.get("default_temperature", 1.0)
         self.enable_system_prompt = settings.get("enable_system_prompt", True)
         self.model_catalog = self._build_model_catalog()
-        default_model = settings.get("default_model", "deepseek")
-        self.default_model = default_model if self._model_exists(default_model) else "deepseek"
+        default_model = self._normalize_browser_model_id(settings.get("default_model", "deepseek-v4-flash"))
+        self.default_model = default_model if self._model_exists(default_model) else "deepseek-v4-flash"
         configured_theme = str(settings.get("browser_theme", "orange") or "orange").strip().lower()
         self.browser_theme = configured_theme if self._theme_exists(configured_theme) else "orange"
         self.browser_accent = self._resolve_browser_accent(
@@ -102,6 +107,9 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         parsed = urlparse(handler.path)
         if parsed.path == "/":
             self._send_html(handler, self._build_index_html())
+            return
+        if parsed.path.startswith("/assets/"):
+            self._handle_browser_asset_request(handler, parsed.path[len("/assets/"):])
             return
         if parsed.path == "/api/records":
             self._handle_records_request(handler)
@@ -294,6 +302,20 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             total += 0.3 if ord(char) <= 127 else 0.6
         return int(math.ceil(total))
 
+    def _estimate_history_message_tokens(
+        self,
+        message: dict[str, Any],
+        *,
+        include_reasoning_content: bool = False,
+    ) -> int:
+        if not isinstance(message, dict):
+            return 0
+
+        total = self._estimate_text_tokens(message.get("content", ""))
+        if include_reasoning_content and message.get("tool_calls"):
+            total += self._estimate_text_tokens(message.get("reasoning_content", ""))
+        return int(total)
+
     def _estimate_context_tokens(self, messages: list[dict[str, Any]], pending_user_text: str = "") -> int:
         total = 0
         for message in messages:
@@ -301,14 +323,26 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 continue
             if str(message.get("role", "")).strip() not in {"system", "assistant", "user", "tool"}:
                 continue
-            total += self._estimate_text_tokens(message.get("content", ""))
+            total += self._estimate_history_message_tokens(
+                message,
+                include_reasoning_content=True,
+            )
         if pending_user_text:
             total += self._estimate_text_tokens(pending_user_text)
         return int(total)
 
     def _estimate_total_tokens(self, session: ChatSession) -> int:
         # 总对话估算 = 正文上下文 + 思考内容（assistant_thinking）。
-        history_tokens = self._estimate_context_tokens(session.get_history())
+        history_tokens = 0
+        for message in session.get_history():
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role", "")).strip() not in {"system", "assistant", "user", "tool"}:
+                continue
+            history_tokens += self._estimate_history_message_tokens(
+                message,
+                include_reasoning_content=False,
+            )
         thinking_tokens = 0
         for message in session.full_context:
             if not isinstance(message, dict):
@@ -803,6 +837,12 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
             role = str(message.get("role", "")).strip()
             content = message.get("content", "")
+            reasoning_content = message.get("reasoning_content", "")
+            reasoning_tokens = (
+                self._estimate_text_tokens(reasoning_content)
+                if role == "assistant_tool_calls"
+                else 0
+            )
 
             if role == "assistant_thinking":
                 if active_model:
@@ -813,8 +853,8 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             if role in {"assistant_answer", "assistant_tool_calls"}:
                 if active_model:
                     bucket = model_totals.setdefault(active_model, {"input_tokens": 0, "output_tokens": 0})
-                    bucket["output_tokens"] += self._estimate_text_tokens(content)
-                conversation_input_context_tokens += self._estimate_text_tokens(content)
+                    bucket["output_tokens"] += self._estimate_text_tokens(content) + reasoning_tokens
+                conversation_input_context_tokens += self._estimate_text_tokens(content) + reasoning_tokens
                 continue
 
             if role == "tool":
@@ -974,11 +1014,21 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             return epoch
         return sum(1 for item in full_context if isinstance(item, dict) and item.get("role") == "user")
 
+    def _normalize_browser_model_id(self, model_id: Any) -> str:
+        normalized = str(model_id or "").strip()
+        if not normalized:
+            return ""
+
+        legacy_map = {
+            "deepseek": "deepseek-v4-flash",
+        }
+        return legacy_map.get(normalized.lower(), normalized)
+
     def _extract_loaded_model(self, full_context: list[dict[str, Any]]) -> str:
         for item in reversed(full_context):
             if not isinstance(item, dict) or item.get("role") != "model":
                 continue
-            model_id = str(item.get("content", "") or "").strip()
+            model_id = self._normalize_browser_model_id(item.get("content", ""))
             if model_id and self._model_exists(model_id):
                 return model_id
         return ""
@@ -1080,9 +1130,10 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         request_payload: dict[str, Any],
         attachments: list[Any],
     ):
-        selected_model = str(request_payload.get("model", self.default_model)).strip() or self.default_model
+        selected_model = self._normalize_browser_model_id(request_payload.get("model", self.default_model)) or self.default_model
         selected_model = selected_model if self._model_exists(selected_model) else self.default_model
-        previous_model = state.selected_model if self._model_exists(state.selected_model) else self.default_model
+        previous_model = self._normalize_browser_model_id(state.selected_model)
+        previous_model = previous_model if self._model_exists(previous_model) else self.default_model
         if previous_model != selected_model:
             state.session.switch_model(selected_model, previous_model)
         state.selected_model = selected_model
@@ -1093,7 +1144,16 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         if not isinstance(extras, dict):
             extras = {}
 
+        selected_reference_images, reference_warnings = self._resolve_reference_image_paths(
+            request_payload.get("reference_images", [])
+        )
+        for warning in reference_warnings:
+            yield {"type": "warning", "content": warning}
+
         image_paths, document_sections, attachment_infos, warnings = self._persist_attachments(attachments)
+        for path in selected_reference_images:
+            if path not in image_paths:
+                image_paths.append(path)
         for warning in warnings:
             yield {"type": "warning", "content": warning}
 
@@ -1138,11 +1198,13 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             extras=extras,
         )
         enabled_tools = ["web_search"] if extra_kwargs.get("enable_search") else []
+        current_time_value = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         state.session.add_user_message(
             content=final_user_text,
             original_text=original_text if original_text != final_user_text else None,
             images=image_paths or None,
+            current_time=current_time_value,
         )
         user_message_added = True
 
@@ -1152,6 +1214,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         history_messages: list[dict[str, Any]] = []
         seen_display_meta: dict[str, Any] = {}
         current_live_tool_history: list[dict[str, Any]] = []
+        live_generated_images: list[dict[str, Any]] = []
         process_defaults_emitted = False
         answer_stream_started = False
         non_content_boundary_since_last_content = False
@@ -1181,6 +1244,48 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                     answer_stream_started = True
                     non_content_boundary_since_last_content = False
                     current_live_tool_history = []
+                elif chunk_type == "image_placeholder":
+                    non_content_boundary_since_last_content = True
+                    try:
+                        placeholder_count = int(chunk.get("count", 1) or 1)
+                    except (TypeError, ValueError):
+                        placeholder_count = 1
+                    self._ensure_generated_image_slots(live_generated_images, max(1, placeholder_count))
+                    chunk["assistant_live_images_html"] = self._render_generated_image_gallery_html(
+                        live_generated_images
+                    )
+                elif chunk_type == "image_generated":
+                    non_content_boundary_since_last_content = True
+                    try:
+                        image_index = int(chunk.get("index", len(live_generated_images)) or 0)
+                    except (TypeError, ValueError):
+                        image_index = len(live_generated_images)
+                    self._ensure_generated_image_slots(live_generated_images, image_index + 1)
+                    live_generated_images[image_index] = {
+                        "index": image_index,
+                        "status": "ready",
+                        "image_path": str(chunk.get("image_path", "") or ""),
+                        "size": str(chunk.get("size", "") or ""),
+                        "source_url": str(chunk.get("source_url", "") or ""),
+                    }
+                    chunk["assistant_live_images_html"] = self._render_generated_image_gallery_html(
+                        live_generated_images
+                    )
+                elif chunk_type == "image_failed":
+                    non_content_boundary_since_last_content = True
+                    try:
+                        image_index = int(chunk.get("index", len(live_generated_images)) or 0)
+                    except (TypeError, ValueError):
+                        image_index = len(live_generated_images)
+                    self._ensure_generated_image_slots(live_generated_images, image_index + 1)
+                    live_generated_images[image_index] = {
+                        "index": image_index,
+                        "status": "failed",
+                        "error": str(chunk.get("error", "") or "图片下载失败"),
+                    }
+                    chunk["assistant_live_images_html"] = self._render_generated_image_gallery_html(
+                        live_generated_images
+                    )
                 elif chunk_type == "thinking":
                     thinking_text = str(chunk.get("content", "") or "")
                     # 仅在“连续正文段”里纠偏 thinking -> content。
@@ -1283,9 +1388,43 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             raise
 
         final_answer = "".join(assistant_text_parts)
-        final_answer_text = final_answer.strip()
+        generated_images = [
+            str(path).strip()
+            for path in meta.get("generated_images", [])
+            if str(path or "").strip()
+        ]
+        image_markdown = self._build_generated_image_markdown(generated_images)
+        if generated_images:
+            ready_slots: list[dict[str, Any]] = []
+            for path in generated_images:
+                matched_slot = next(
+                    (
+                        slot
+                        for slot in live_generated_images
+                        if str(slot.get("status", "")).strip().lower() == "ready"
+                        and str(slot.get("image_path", "")).strip() == path
+                    ),
+                    None,
+                )
+                ready_slots.append(
+                    {
+                        "index": len(ready_slots),
+                        "status": "ready",
+                        "image_path": path,
+                        "size": str((matched_slot or {}).get("size", "") or ""),
+                    }
+                )
+            assistant_blocks.append({"kind": "gallery", "content": ready_slots})
 
-        if not final_answer_text:
+        final_answer_text = final_answer.strip()
+        if image_markdown:
+            final_answer_text = (
+                f"{final_answer_text}\n\n{image_markdown}"
+                if final_answer_text
+                else image_markdown
+            )
+
+        if not final_answer_text and not generated_images:
             final_answer = "模型没有返回有效内容。"
             final_answer_text = final_answer
             if not assistant_blocks or str(assistant_blocks[-1].get("kind", "")).strip() != "answer":
@@ -1333,6 +1472,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 assistant_blocks,
             ),
             "user_html": self._render_user_block(original_text, image_paths, attachment_infos),
+            "user_timestamp_display": _format_conversation_timestamp(current_time_value),
             "saved_basename": (auto_save_result or {}).get("saved_basename", state.saved_basename),
             "saved_path": (auto_save_result or {}).get("saved_path", ""),
             "autosave_error": auto_save_error,
@@ -1433,6 +1573,39 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
         return image_paths, document_sections, attachment_infos, warnings
 
+    def _resolve_reference_image_paths(self, raw_paths: Any) -> tuple[list[str], list[str]]:
+        if not isinstance(raw_paths, list):
+            return [], []
+
+        project_root = os.path.normcase(os.path.realpath(self.project_root))
+        image_paths: list[str] = []
+        warnings: list[str] = []
+        seen: set[str] = set()
+
+        for item in raw_paths:
+            candidate = str(item or "").strip()
+            if not candidate:
+                continue
+
+            real_path = os.path.normcase(os.path.realpath(os.path.abspath(candidate)))
+            display_name = os.path.basename(candidate) or candidate
+            is_within_project = real_path == project_root or real_path.startswith(project_root + os.sep)
+            if not is_within_project:
+                warnings.append(f"已忽略不在项目目录中的引用图片：{display_name}")
+                continue
+            if not os.path.isfile(real_path):
+                warnings.append(f"引用图片不存在，已忽略：{display_name}")
+                continue
+            if os.path.splitext(real_path)[1].lower() not in self.IMAGE_EXTENSIONS:
+                warnings.append(f"引用文件不是支持的图片格式，已忽略：{display_name}")
+                continue
+            if real_path in seen:
+                continue
+            seen.add(real_path)
+            image_paths.append(real_path)
+
+        return image_paths, warnings
+
     def _build_model_request(
         self,
         selected_model: str,
@@ -1440,24 +1613,23 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         extras: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
         extra_kwargs: dict[str, Any] = {}
-        resolved_model = selected_model
+        normalized_selected_model = self._normalize_browser_model_id(selected_model)
+        resolved_model = normalized_selected_model
 
-        if selected_model == "deepseek":
-            if thinking_value == "chat":
-                resolved_model = "deepseek-chat"
-            else:
-                resolved_model = "deepseek-reasoner"
+        if normalized_selected_model in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+            thinking_mode = str(thinking_value or "1").strip().lower()
+            thinking_enabled = thinking_mode not in {"0", "disabled", "off", "none", "false", "chat"}
+            if thinking_enabled:
+                extra_kwargs["enable_thinking"] = True
+                extra_kwargs["reasoningEffort"] = "2" if thinking_mode in {"2", "enhance", "enhanced", "max"} else "1"
                 if extras.get("interactive_thinking"):
                     extra_kwargs["enable_enhanced_thinking"] = True
             if extras.get("enable_search"):
                 extra_kwargs["enable_search"] = True
-                if resolved_model == "deepseek-chat":
-                    extra_kwargs["searchEffort"] = "minimal"
-                else:
-                    extra_kwargs["searchEffort"] = str(extras.get("search_effort", "low"))
+                extra_kwargs["searchEffort"] = str(extras.get("search_effort", "low")) if extra_kwargs.get("enable_thinking") else "minimal"
 
-        elif selected_model == "deepseek-agent-preview":
-            resolved_model = "deepseek-reasoner"
+        elif normalized_selected_model == "deepseek-agent-preview":
+            resolved_model = "deepseek-v4-pro"
             extra_kwargs["enable_agent"] = True
             if extras.get("interactive_thinking"):
                 extra_kwargs["enable_enhanced_thinking"] = True
@@ -1465,25 +1637,43 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 extra_kwargs["enable_search"] = True
                 extra_kwargs["searchEffort"] = str(extras.get("search_effort", "medium"))
 
-        elif "gemini" in selected_model:
+        elif "gemini" in normalized_selected_model:
             extra_kwargs["think_level"] = str(thinking_value or "medium")
             extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
 
-        elif "qwen" in selected_model:
+        elif "qwen" in normalized_selected_model:
             extra_kwargs["isQwenThinking"] = str(thinking_value or "auto")
             extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
             if extra_kwargs["enable_search"]:
                 extra_kwargs["search_strategy"] = str(extras.get("search_strategy", "turbo"))
 
-        elif "doubao" in selected_model:
+        elif normalized_selected_model in self.IMAGE_MODEL_IDS:
+            extra_kwargs["resolution"] = self._normalize_seedream_resolution(
+                thinking_value,
+                normalized_selected_model,
+            )
+            extra_kwargs["enable_image_thinking"] = True
+            requested_image_count = self._normalize_seedream_image_count(extras.get("max_images", 1))
+            extra_kwargs["requested_image_count"] = requested_image_count
+            if normalized_selected_model == "doubao-seedream-5-0-260128":
+                extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
+                output_format = str(extras.get("output_format", "jpeg") or "jpeg").strip().lower()
+                if output_format in {"jpeg", "png", "webp"}:
+                    extra_kwargs["output_format"] = output_format
+
+            if requested_image_count > 1:
+                extra_kwargs["sequential_image_generation"] = "auto"
+                extra_kwargs["sequential_image_generation_options"] = {"max_images": requested_image_count}
+
+        elif "doubao" in normalized_selected_model:
             extra_kwargs["reasoningEffort"] = str(thinking_value or "medium")
             extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
 
-        elif "kimi" in selected_model:
+        elif "kimi" in normalized_selected_model:
             extra_kwargs["enable_thinking"] = thinking_value != "disabled"
             extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
 
-        elif "minimax" in selected_model.lower():
+        elif "minimax" in normalized_selected_model.lower():
             extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
             high_speed = bool(extras.get("high_speed", False))
             if high_speed and not resolved_model.endswith("-highspeed"):
@@ -1492,6 +1682,98 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 resolved_model = resolved_model.replace("-highspeed", "")
 
         return resolved_model, extra_kwargs
+
+    def _normalize_seedream_resolution(self, value: Any, model_id: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return "2K"
+
+        upper_value = normalized.upper()
+        if upper_value in {"1K", "2K", "3K", "4K"}:
+            return upper_value
+
+        exact_value = (
+            normalized.lower()
+            .replace("×", "x")
+            .replace("脳", "x")
+            .replace("*", "x")
+            .replace(" ", "")
+        )
+        if exact_value.count("x") == 1:
+            left, right = exact_value.split("x", 1)
+            if left.isdigit() and right.isdigit():
+                return f"{int(left)}x{int(right)}"
+
+        if model_id == "doubao-seedream-5-0-260128":
+            return "2K"
+        return "2K"
+
+    def _normalize_seedream_image_count(self, value: Any) -> int:
+        try:
+            count = int(str(value or "1").strip())
+        except (TypeError, ValueError):
+            count = 1
+        return max(1, min(count, 15))
+
+    def _build_generated_image_markdown(self, image_paths: list[str]) -> str:
+        if not image_paths:
+            return ""
+        return "\n\n".join(
+            f"![Generated Image {index + 1}]({path})"
+            for index, path in enumerate(image_paths)
+        )
+
+    def _ensure_generated_image_slots(self, slots: list[dict[str, Any]], count: int) -> None:
+        while len(slots) < count:
+            slots.append({"index": len(slots), "status": "pending"})
+
+    def _render_generated_image_gallery_html(self, slots: list[dict[str, Any]]) -> str:
+        if not slots:
+            return ""
+
+        cards: list[str] = []
+        for index, slot in enumerate(slots):
+            status = str(slot.get("status", "pending") or "pending").strip().lower()
+            title = f"Generated Image {index + 1}"
+
+            if status == "ready":
+                image_path = str(slot.get("image_path", "") or "")
+                if image_path:
+                    file_url = self._browser_file_url(image_path)
+                    size_text = str(slot.get("size", "") or "").strip()
+                    cards.append(
+                        '<figure class="image-card generated-image-card is-ready" '
+                        f'data-local-image-path="{html.escape(image_path, quote=True)}">'
+                        f'<a class="image-card-link" href="{file_url}" target="_blank" rel="noreferrer">'
+                        f'<img class="zoomable-image generated-image-thumb" src="{file_url}" alt="{html.escape(title)}">'
+                        "</a>"
+                        f'<figcaption class="generated-image-caption">{html.escape(size_text or title)}</figcaption>'
+                        "</figure>"
+                    )
+                    continue
+
+            if status == "failed":
+                error_text = html.escape(str(slot.get("error", "") or "Download failed"))
+                cards.append(
+                    '<figure class="image-card generated-image-card is-failed">'
+                    '<div class="generated-image-fallback">'
+                    '<span class="generated-image-status">Download failed</span>'
+                    f'<span class="generated-image-error">{error_text}</span>'
+                    "</div>"
+                    f'<figcaption class="generated-image-caption">{html.escape(title)}</figcaption>'
+                    "</figure>"
+                )
+                continue
+
+            cards.append(
+                '<figure class="image-card generated-image-card is-placeholder">'
+                '<div class="generated-image-skeleton" aria-hidden="true"></div>'
+                '<div class="generated-image-skeleton generated-image-skeleton--line" aria-hidden="true"></div>'
+                f'<figcaption class="generated-image-caption">{html.escape(title)}</figcaption>'
+                "</figure>"
+            )
+
+        return f'<div class="generated-image-gallery">{"".join(cards)}</div>'
 
     def _merge_meta(self, meta: dict[str, Any], chunk: dict[str, Any]) -> None:
         list_keys = {
@@ -1587,7 +1869,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             "history_messages",
         }
         for key, value in chunk.items():
-            if key in {"type", "thinking_time", "tool_calls"}:
+            if key in {"type", "thinking_time", "tool_calls", "generated_images", "image_failures"}:
                 continue
             if key in list_keys:
                 values = value if isinstance(value, list) else [value]
@@ -1816,10 +2098,12 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             for path in image_paths:
                 file_url = self._browser_file_url(path)
                 cards.append(
-                    '<div class="image-card">'
-                    f'<img src="{file_url}" alt="用户上传图片">'
-                    f'<a href="{file_url}" target="_blank" rel="noreferrer">{html.escape(os.path.basename(path))}</a>'
-                    "</div>"
+                    '<figure class="image-card message-image-card">'
+                    f'<a class="image-card-link" href="{file_url}" target="_blank" rel="noreferrer">'
+                    f'<img class="zoomable-image" src="{file_url}" alt="用户上传图片">'
+                    "</a>"
+                    f'<figcaption class="generated-image-caption">{html.escape(os.path.basename(path))}</figcaption>'
+                    "</figure>"
                 )
             extras.append(f'<div class="image-grid">{"".join(cards)}</div>')
 
@@ -2142,7 +2426,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         if extra_class:
             class_name += f" {extra_class.strip()}"
         return (
-            f'<details class="{class_name}" style="margin-bottom: 14px;">'
+            f'<details class="{class_name}">'
             f"<summary>{self._render_summary(summary)}</summary>"
             '<div class="meta-content">'
             f"{body}"
@@ -2176,6 +2460,34 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
         handler.send_response(200)
         handler.send_header("Content-Type", mime_type)
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+
+    def _handle_browser_asset_request(self, handler: BaseHTTPRequestHandler, asset_name: str) -> None:
+        relative_name = asset_name.lstrip("/").replace("\\", "/")
+        if not relative_name:
+            self._send_json(handler, {"error": "缺少资源路径"}, status=400)
+            return
+
+        static_root = os.path.realpath(os.fspath(self._browser_static_path()))
+        asset_path = os.path.realpath(os.path.join(static_root, relative_name))
+        if not asset_path.startswith(static_root + os.sep):
+            self._send_json(handler, {"error": "禁止访问该资源"}, status=403)
+            return
+        if not os.path.exists(asset_path) or not os.path.isfile(asset_path):
+            self._send_json(handler, {"error": "资源不存在"}, status=404)
+            return
+
+        mime_type, _ = mimetypes.guess_type(asset_path)
+        mime_type = mime_type or "application/octet-stream"
+        with open(asset_path, "rb") as handle:
+            data = handle.read()
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", mime_type)
+        handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()
         handler.wfile.write(data)
@@ -2194,6 +2506,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         data = body.encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "text/html; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()
         handler.wfile.write(data)
@@ -2209,14 +2522,48 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
     def _build_model_catalog(self) -> list[dict[str, Any]]:
         return [
             {
-                "id": "deepseek",
-                "label": "DeepSeek",
+                "id": "deepseek-v4-flash",
+                "label": "DeepSeek V4 Flash",
                 "supports_attachments": True,
                 "thinking": {
-                    "default": "reasoner",
+                    "default": "1",
                     "options": [
-                        {"value": "reasoner", "label": "深度"},
-                        {"value": "chat", "label": "快速"},
+                        {"value": "0", "label": "关闭"},
+                        {"value": "1", "label": "标准"},
+                        {"value": "2", "label": "增强"},
+                    ],
+                },
+                "extra_fields": [
+                    {"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False},
+                    {
+                        "key": "search_effort",
+                        "type": "select",
+                        "label": "搜索强度",
+                        "default": "low",
+                        "show_when": {"key": "enable_search", "equals": True},
+                        "options": [
+                            {"value": "time_only", "label": "仅时间"},
+                            {"value": "minimal", "label": "极低"},
+                            {"value": "low", "label": "低"},
+                            {"value": "medium", "label": "中"},
+                            {"value": "high", "label": "高"},
+                            {"value": "max", "label": "最大"},
+                            {"value": "unlimited", "label": "无限制"},
+                        ],
+                    },
+                    {"key": "interactive_thinking", "type": "boolean", "label": "交互式思考", "default": False},
+                ],
+            },
+            {
+                "id": "deepseek-v4-pro",
+                "label": "DeepSeek V4 Pro",
+                "supports_attachments": True,
+                "thinking": {
+                    "default": "1",
+                    "options": [
+                        {"value": "0", "label": "关闭"},
+                        {"value": "1", "label": "标准"},
+                        {"value": "2", "label": "增强"},
                     ],
                 },
                 "extra_fields": [
@@ -2432,6 +2779,58 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 ],
             },
             {
+                "id": "doubao-seedream-5-0-260128",
+                "label": "Seedream 5.0",
+                "supports_attachments": True,
+                "thinking": self._seedream_resolution_options(default="2K", high_label="3K"),
+                "extra_fields": [
+                    {"key": "enable_search", "type": "boolean", "label": "Web Search", "default": False},
+                    {
+                        "key": "output_format",
+                        "type": "select",
+                        "label": "Output Format",
+                        "default": "jpeg",
+                        "options": [
+                            {"value": "jpeg", "label": "JPEG"},
+                            {"value": "png", "label": "PNG"},
+                            {"value": "webp", "label": "WEBP"},
+                        ],
+                    },
+                    {
+                        "key": "max_images",
+                        "type": "image_count",
+                        "label": "生成张数",
+                        "default": "1",
+                        "options": [
+                            {"value": "1", "label": "1"},
+                            {"value": "2", "label": "2"},
+                            {"value": "3", "label": "3"},
+                            {"value": "4", "label": "4"},
+                        ],
+                    },
+                ],
+            },
+            {
+                "id": "doubao-seedream-4-5-251128",
+                "label": "Seedream 4.5",
+                "supports_attachments": True,
+                "thinking": self._seedream_resolution_options(default="2K", high_label="4K"),
+                "extra_fields": [
+                    {
+                        "key": "max_images",
+                        "type": "image_count",
+                        "label": "生成张数",
+                        "default": "1",
+                        "options": [
+                            {"value": "1", "label": "1"},
+                            {"value": "2", "label": "2"},
+                            {"value": "3", "label": "3"},
+                            {"value": "4", "label": "4"},
+                        ],
+                    },
+                ],
+            },
+            {
                 "id": "multi-assistant-old-preview",
                 "label": "Multi Assistant",
                 "supports_attachments": True,
@@ -2448,6 +2847,30 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 {"value": "low", "label": "低"},
                 {"value": "medium", "label": "中"},
                 {"value": "high", "label": "高"},
+            ],
+        }
+
+    def _seedream_resolution_options(self, default: str, high_label: str) -> dict[str, Any]:
+        return {
+            "kind": "resolution",
+            "label": "Resolution",
+            "default": default,
+            "options": [
+                {"value": "2K", "label": "2K"},
+                {"value": high_label, "label": high_label},
+                {
+                    "label": "更多",
+                    "children": [
+                        {"value": "1024x1024", "label": "1024x1024"},
+                        {"value": "1536x1024", "label": "1536x1024"},
+                        {"value": "1024x1536", "label": "1024x1536"},
+                        {"value": "2048x2048", "label": "2048x2048"},
+                        {"value": "2048x1536", "label": "2048x1536"},
+                        {"value": "1536x2048", "label": "1536x2048"},
+                        {"value": "3072x2048", "label": "3072x2048"},
+                        {"value": "2048x3072", "label": "2048x3072"},
+                    ],
+                },
             ],
         }
 

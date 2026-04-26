@@ -3,10 +3,9 @@ import base64
 import html
 import mimetypes
 import re
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
-
-from latex2mathml.converter import convert as latex_to_mathml
 
 
 def render_chat_archive_html(full_context: list[dict], title: str) -> str:
@@ -188,14 +187,27 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
         }}
         .user-row {{
             display: flex;
-            justify-content: flex-end;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 8px;
         }}
         .user-bubble {{
             max-width: min(82%, 720px);
             background: var(--user);
             border-radius: 22px;
-            padding: 16px 18px;
+            padding: 12px 16px;
             box-shadow: var(--shadow);
+        }}
+        .user-bubble .message-content {{
+            line-height: 1.52;
+        }}
+        .user-timestamp {{
+            max-width: min(82%, 720px);
+            padding-right: 6px;
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.2;
+            text-align: right;
         }}
         .assistant-block {{
             margin-top: 14px;
@@ -303,23 +315,34 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             overflow-x: auto;
             overflow-y: hidden;
             padding: 0.15em 0;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
         }}
         .message-content a {{
             color: #0f5ec9;
             text-decoration: none;
         }}
         .message-content .math-inline {{
-            display: inline-flex;
+            display: inline-block;
+            width: max-content;
             max-width: 100%;
             overflow-x: auto;
             overflow-y: hidden;
             vertical-align: middle;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
         }}
         .message-content .math-block {{
             display: block;
             width: 100%;
             margin: 1em 0;
             text-align: center;
+        }}
+        .message-content .katex-display::-webkit-scrollbar,
+        .message-content .math-block::-webkit-scrollbar,
+        .message-content .math-inline::-webkit-scrollbar {{
+            width: 0;
+            height: 0;
         }}
         .message-content .math-inline math,
         .message-content .math-block math {{
@@ -343,23 +366,27 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             padding: 10px;
             overflow: hidden;
         }}
+        .image-card-link {{
+            display: block;
+            margin-top: 0;
+            text-decoration: none;
+        }}
         .message-content img {{
             display: block;
-            width: auto;
+            width: 100%;
             max-width: 100%;
-            height: auto;
-            max-height: min(56vh, 460px);
+            height: 224px;
             object-fit: contain;
             border-radius: 10px;
             background: #fff;
+            cursor: zoom-in;
         }}
         .image-card img {{
             display: block;
             width: 100%;
             max-width: 100%;
-            height: auto;
+            height: 224px;
             border-radius: 10px;
-            max-height: min(56vh, 420px);
             object-fit: contain;
             background: #fff;
         }}
@@ -463,6 +490,9 @@ def render_chat_archive_html(full_context: list[dict], title: str) -> str:
             .user-bubble {{
                 max-width: 100%;
             }}
+            .user-timestamp {{
+                max-width: 100%;
+            }}
             .message-content img,
             .image-card img {{
                 max-height: 46vh;
@@ -545,6 +575,7 @@ def _build_render_structure(full_context: list[dict]) -> dict:
     misc_messages = []
     current_turn = None
     pending_epoch = None
+    pending_current_time = ""
     pending_user_meta = []
     pending_process_items: list[dict] = []
 
@@ -555,6 +586,7 @@ def _build_render_structure(full_context: list[dict]) -> dict:
                 "epoch": pending_epoch,
                 "user": None,
                 "user_meta": [],
+                "current_time": pending_current_time,
                 "assistant_model": "",
                 "assistant_blocks": [],
             }
@@ -576,7 +608,7 @@ def _build_render_structure(full_context: list[dict]) -> dict:
             ensure_turn()["assistant_blocks"].append({"kind": "process", "content": payload})
 
     def flush_turn() -> None:
-        nonlocal current_turn, pending_epoch, pending_user_meta
+        nonlocal current_turn, pending_epoch, pending_current_time, pending_user_meta
         flush_pending_process()
         if current_turn and (
             current_turn["user"] is not None
@@ -586,6 +618,7 @@ def _build_render_structure(full_context: list[dict]) -> dict:
             turns.append(current_turn)
         current_turn = None
         pending_epoch = None
+        pending_current_time = ""
         pending_user_meta = []
 
     for msg in full_context:
@@ -620,10 +653,20 @@ def _build_render_structure(full_context: list[dict]) -> dict:
                 "epoch": pending_epoch,
                 "user": content,
                 "user_meta": pending_user_meta.copy(),
+                "current_time": pending_current_time,
                 "assistant_model": "",
                 "assistant_blocks": [],
             }
+            pending_current_time = ""
             pending_user_meta = []
+            continue
+
+        if role == "current_time":
+            timestamp_text = str(content or "").strip()
+            if current_turn is not None and current_turn.get("user") is not None:
+                current_turn["current_time"] = timestamp_text
+            else:
+                pending_current_time = timestamp_text
             continue
 
         if role == "model":
@@ -754,12 +797,14 @@ def _render_turn(turn: dict) -> str:
     user_html = ""
     if turn.get("user") is not None:
         extras = "".join(_render_user_meta(item) for item in turn.get("user_meta", []))
+        timestamp_html = _render_user_timestamp(turn.get("current_time"))
         user_html = f"""
 <div class="user-row">
     <div class="user-bubble">
         {_render_markdown_block(str(turn["user"]))}
         {extras}
     </div>
+    {timestamp_html}
 </div>
 """
 
@@ -828,10 +873,77 @@ def _render_user_meta(item: dict) -> str:
     return ""
 
 
+def _parse_conversation_timestamp(value) -> datetime | None:
+    if isinstance(value, datetime):
+        dt_value = value
+    elif isinstance(value, (int, float)):
+        try:
+            dt_value = datetime.fromtimestamp(float(value))
+        except (OverflowError, OSError, ValueError):
+            return None
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+
+        normalized_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+        try:
+            dt_value = datetime.fromisoformat(normalized_text)
+        except ValueError:
+            dt_value = None
+            for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+                try:
+                    dt_value = datetime.strptime(text, pattern)
+                    break
+                except ValueError:
+                    continue
+            if dt_value is None:
+                return None
+
+    if dt_value.tzinfo is not None:
+        dt_value = dt_value.astimezone().replace(tzinfo=None)
+    return dt_value
+
+
+def _format_conversation_timestamp(value, now: datetime | None = None) -> str:
+    timestamp = _parse_conversation_timestamp(value)
+    if timestamp is None:
+        return ""
+
+    now_value = now or datetime.now()
+    if now_value.tzinfo is not None:
+        now_value = now_value.astimezone().replace(tzinfo=None)
+
+    if timestamp.date() == now_value.date():
+        return timestamp.strftime("%H:%M")
+    if timestamp.year == now_value.year:
+        return timestamp.strftime("%m-%d %H:%M")
+    return timestamp.strftime("%Y-%m-%d %H:%M")
+
+
+def _render_user_timestamp(value) -> str:
+    formatted = _format_conversation_timestamp(value)
+    if not formatted:
+        return ""
+    return f'<div class="user-timestamp">{html.escape(formatted)}</div>'
+
+
 def _render_assistant_blocks(blocks: list[dict], model_name: str = "") -> str:
     if not blocks:
         return ""
-    return "".join(_render_assistant_block(block, model_name) for block in blocks)
+    last_answer_index = -1
+    for index, block in enumerate(blocks):
+        if isinstance(block, dict) and str(block.get("kind", "")).strip().lower() == "answer":
+            last_answer_index = index
+
+    filtered_blocks = []
+    for index, block in enumerate(blocks):
+        kind = str(block.get("kind", "")).strip().lower() if isinstance(block, dict) else ""
+        if last_answer_index >= 0 and index > last_answer_index and kind == "process":
+            continue
+        filtered_blocks.append(block)
+
+    return "".join(_render_assistant_block(block, model_name) for block in filtered_blocks)
 
 
 def _render_assistant_block(block: dict, model_name: str = "") -> str:
@@ -843,9 +955,38 @@ def _render_assistant_block(block: dict, model_name: str = "") -> str:
         return _render_assistant_thinking_block(block, model_name)
     if kind == "process":
         return _render_assistant_process_block(block, model_name)
+    if kind == "gallery":
+        return _render_assistant_gallery_block(block)
     if kind == "answer":
         return f'<div class="assistant-answer">{_render_markdown_block(str(block.get("content", "")))}</div>'
     return ""
+
+
+def _render_assistant_gallery_block(block: dict) -> str:
+    content = block.get("content", [])
+    items = content if isinstance(content, list) else []
+    cards: list[str] = []
+    for index, item in enumerate(items):
+        if isinstance(item, dict):
+            image_path = str(item.get("image_path", "") or item.get("path", "") or "").strip()
+            size_text = str(item.get("size", "") or "").strip()
+        else:
+            image_path = str(item or "").strip()
+            size_text = ""
+        if not image_path:
+            continue
+        image_html = _render_inline_image(f"Generated Image {index + 1}", image_path)
+        image_html = image_html.replace(
+            'class="image-card message-image-card"',
+            'class="image-card generated-image-card is-ready"',
+            1,
+        )
+        if size_text:
+            image_html = image_html[:-9] + f'<figcaption class="generated-image-caption">{html.escape(size_text)}</figcaption></figure>'
+        cards.append(image_html)
+    if not cards:
+        return ""
+    return f'<div class="assistant-answer"><div class="generated-image-gallery">{"".join(cards)}</div></div>'
 
 
 def _render_assistant_thinking_block(block: dict, model_name: str = "") -> str:
@@ -1292,12 +1433,12 @@ def _render_markdown_block(text: str, allow_thematic_break: bool = True) -> str:
 
     def replace_math_block(match):
         key = f"__MATH_BLOCK_{len(placeholders)}__"
-        placeholders[key] = _render_math_mathml(match.group(1), display_mode=True)
+        placeholders[key] = _render_math_markup(match.group(1), display_mode=True)
         return f"\n{key}\n"
 
     def replace_math_inline(match):
         key = f"__MATH_BLOCK_{len(placeholders)}__"
-        placeholders[key] = _render_math_mathml(match.group(1), display_mode=False)
+        placeholders[key] = _render_math_markup(match.group(1), display_mode=False)
         return key
 
     source = re.sub(r"\\\[([\s\S]*?)\\\]", replace_math_block, source)
@@ -1515,28 +1656,37 @@ def _render_markdown_table(lines: list[str]) -> str:
 
 def _render_math_placeholder(expression: str, placeholders: dict, display_mode: bool) -> str:
     key = f"__MATH_BLOCK_{len(placeholders)}__"
-    placeholders[key] = _render_math_mathml(expression, display_mode=display_mode)
+    placeholders[key] = _render_math_markup(expression, display_mode=display_mode)
     return key
 
 
-def _render_math_mathml(expression: str, display_mode: bool) -> str:
+def _render_math_markup(expression: str, display_mode: bool) -> str:
     source = str(expression or "").strip()
     if not source:
         return ""
 
-    try:
-        mathml = latex_to_mathml(source)
-    except Exception:
-        fallback = html.escape(source)
-        class_name = "math-block" if display_mode else "math-inline"
-        return f'<span class="{class_name}">{fallback}</span>'
-
+    # Preserve LaTeX delimiters here so final HTML uses the same client-side KaTeX path as streaming output.
     class_name = "math-block" if display_mode else "math-inline"
-    return f'<div class="{class_name}">{mathml}</div>' if display_mode else f'<span class="{class_name}">{mathml}</span>'
+    escaped_source = html.escape(source)
+    if display_mode:
+        return f'<div class="{class_name}">\\[{escaped_source}\\]</div>'
+    return f'<span class="{class_name}">\\({escaped_source}\\)</span>'
 
 
 def _render_inline_image(alt: str, src: str) -> str:
     real_src = html.unescape(src)
     uri = _normalize_image_src(real_src)
     alt_text = html.escape(html.unescape(alt))
-    return f'<span class="image-card" style="display:block;margin:12px 0;"><img src="{uri}" alt="{alt_text}"></span>'
+    local_path = _resolve_local_image_path(real_src)
+    local_path_attr = (
+        f' data-local-image-path="{html.escape(str(local_path), quote=True)}"'
+        if local_path is not None
+        else ""
+    )
+    return (
+        f'<figure class="image-card message-image-card"{local_path_attr}>'
+        f'<a class="image-card-link" href="{uri}" target="_blank" rel="noreferrer">'
+        f'<img class="zoomable-image" src="{uri}" alt="{alt_text}">'
+        "</a>"
+        "</figure>"
+    )
