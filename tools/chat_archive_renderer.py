@@ -1465,8 +1465,8 @@ def _render_markdown_block(text: str, allow_thematic_break: bool = True) -> str:
     lines = source.split("\n")
     html_parts = []
     paragraph_lines = []
-    list_items = []
-    list_tag = None
+    # support nested lists by tracking a stack of (tag, indent, items)
+    list_stack: list[dict] = []
     blockquote_lines = []
     index = 0
 
@@ -1477,11 +1477,18 @@ def _render_markdown_block(text: str, allow_thematic_break: bool = True) -> str:
             paragraph_lines = []
 
     def flush_list():
-        nonlocal list_items, list_tag
-        if list_items and list_tag:
-            html_parts.append(f"<{list_tag}>{''.join(list_items)}</{list_tag}>")
-        list_items = []
-        list_tag = None
+        nonlocal list_stack
+        while list_stack:
+            node = list_stack.pop()
+            node_html = f"<{node['tag']}>{''.join(node['items'])}</{node['tag']}>"
+            if list_stack:
+                parent = list_stack[-1]
+                if parent['items']:
+                    parent['items'][-1] = parent['items'][-1][:-5] + node_html + "</li>"
+                else:
+                    parent['items'].append(f"<li>{node_html}</li>")
+            else:
+                html_parts.append(node_html)
 
     def flush_blockquote():
         nonlocal blockquote_lines
@@ -1561,16 +1568,39 @@ def _render_markdown_block(text: str, allow_thematic_break: bool = True) -> str:
 
         flush_blockquote()
 
-        ul_match = re.match(r"^[-*]\s+(.*)$", stripped)
-        ol_match = re.match(r"^\d+\.\s+(.*)$", stripped)
+        # detect leading indentation to support nested lists
+        leading = re.match(r"^[ \t]*", line).group(0)
+        indent = len(leading.replace('\t', '    '))
+        ul_match = re.match(r"^[ \t]*[-*]\s+(.*)$", line)
+        ol_match = re.match(r"^[ \t]*(\d+)\.\s+(.*)$", line)
         if ul_match or ol_match:
             flush_paragraph()
             tag = "ul" if ul_match else "ol"
-            item = ul_match.group(1) if ul_match else ol_match.group(1)
-            if list_tag not in (None, tag):
-                flush_list()
-            list_tag = tag
-            list_items.append(f"<li>{item}</li>")
+            item = ul_match.group(1) if ul_match else ol_match.group(2)
+            # if no stack, push new
+            if not list_stack:
+                list_stack.append({"tag": tag, "indent": indent, "items": [f"<li>{item}</li>"]})
+            else:
+                # pop until appropriate nesting level
+                while list_stack and indent < list_stack[-1]["indent"]:
+                    node = list_stack.pop()
+                    node_html = f"<{node['tag']}>{''.join(node['items'])}</{node['tag']}>"
+                    if list_stack:
+                        parent = list_stack[-1]
+                        if parent['items']:
+                            parent['items'][-1] = parent['items'][-1][:-5] + node_html + "</li>"
+                        else:
+                            parent['items'].append(f"<li>{node_html}</li>")
+                    else:
+                        html_parts.append(node_html)
+
+                # same level and same tag -> append
+                if list_stack and indent == list_stack[-1]["indent"] and tag == list_stack[-1]["tag"]:
+                    list_stack[-1]["items"].append(f"<li>{item}</li>")
+                else:
+                    # new nested list or different tag at same indent
+                    list_stack.append({"tag": tag, "indent": indent, "items": [f"<li>{item}</li>"]})
+
             index += 1
             continue
 

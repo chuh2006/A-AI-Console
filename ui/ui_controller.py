@@ -36,9 +36,9 @@ class UIController:
             "1": "deepseek-agent-preview",
             "2": "deepseek-v4-flash",
             "3": "deepseek-v4-pro",
-            "4": "multi-assistant-old-preview",
-            "5": "错误消息",
-            "6": "math-model",
+            "4": "deepseek-v3-2-251201",
+            "5": "multi-assistant-old-preview",
+            "6": "错误消息",
             "7": "gemini-3.1-flash-lite-preview",
             "8": "gemini-3-flash-preview",
             "9": "gemini-3.1-pro-preview",
@@ -368,7 +368,7 @@ class UIController:
                 return
             path_list.append(target_path)
 
-        if "gemini" in model_name or "doubao" in model_name or "qwen" in model_name or "deepseek" in model_name or "kimi" in model_name:
+        if "gemini" in model_name or "doubao" in model_name or "qwen" in model_name or "deepseek" in model_name or "kimi" in model_name and model_name != "deepseek-v3-2-251201":
             clipboard_content = ImageGrab.grabclipboard()
             if clipboard_content is not None:
                 if isinstance(clipboard_content, Image.Image):
@@ -682,11 +682,11 @@ class UIController:
                 last_output_ended_with_newline = True
             elif chunk_type == "input":
                 _flush_thinking_footer(show_transition=False)
-                final_answer = self.get_user_input(prompt="璇疯嚜宸卞洖绛旓細")
+                final_answer = self.get_user_input(prompt="请自己回答：")
                 last_output_ended_with_newline = True
             elif chunk_type == "error_msg":
                 _flush_thinking_footer(show_transition=False)
-                final_answer = self.get_user_input(prompt="璇疯緭鍏ラ敊璇秷鎭細")
+                final_answer = self.get_user_input(prompt="请输入错误消息：")
                 last_output_ended_with_newline = True
 
         _flush_thinking_footer(show_transition=False)

@@ -588,7 +588,7 @@ class VolcengineClient(BaseLLMClient):
         image_paths: List[str] | None = None,
         **kwargs,
     ) -> Generator[Dict[str, Any], None, None]:
-        old_ver = self.model_name in {"doubao-seed-1-6-flash-250828"}
+        old_ver = self.model_name in {"doubao-seed-1-6-flash-250828", "deepseek-v3-2-251201"}
         reasoning_effort = kwargs.get("reasoningEffort", "medium")
         enable_search = kwargs.get("enable_search", False)
         keyword_count_mapping = {"minimal": 2, "low": 4, "medium": 8, "high": 12}

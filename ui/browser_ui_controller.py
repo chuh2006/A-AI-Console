@@ -1628,6 +1628,9 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 extra_kwargs["enable_search"] = True
                 extra_kwargs["searchEffort"] = str(extras.get("search_effort", "low")) if extra_kwargs.get("enable_thinking") else "minimal"
 
+        
+
+
         elif normalized_selected_model == "deepseek-agent-preview":
             resolved_model = "deepseek-v4-pro"
             extra_kwargs["enable_agent"] = True
@@ -1667,6 +1670,10 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
         elif "doubao" in normalized_selected_model:
             extra_kwargs["reasoningEffort"] = str(thinking_value or "medium")
+            extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
+
+        elif normalized_selected_model == "deepseek-v3-2-251201":
+            extra_kwargs["enable_thinking"] = thinking_value != "disabled"
             extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
 
         elif "kimi" in normalized_selected_model:
@@ -2521,6 +2528,19 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
     def _build_model_catalog(self) -> list[dict[str, Any]]:
         return [
+            {
+                "id": "deepseek-v3-2-251201",
+                "label": "DeepSeek V3.2",
+                "supports_attachments": True,
+                "thinking": {
+                    "default": "enabled",
+                    "options": [
+                        {"value": "enabled", "label": "深度思考"},
+                        {"value": "disabled", "label": "快速回答"},
+                    ],
+                },
+                "extra_fields": [{"key": "enable_search", "type": "boolean", "label": "联网搜索", "default": False}],
+            },
             {
                 "id": "deepseek-v4-flash",
                 "label": "DeepSeek V4 Flash",

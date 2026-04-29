@@ -3535,8 +3535,8 @@
         const lines = source.split("\n");
         const htmlParts = [];
         let paragraphLines = [];
-        let listItems = [];
-        let listTag = null;
+        // support nested lists: stack of { tag, indent, items }
+        let listStack = [];
         let blockquoteLines = [];
         let index = 0;
 
@@ -3547,11 +3547,21 @@
         }
 
         function flushList() {
-            if (listItems.length && listTag) {
-                htmlParts.push(`<${listTag}>${listItems.join("")}</${listTag}>`);
+            while (listStack.length) {
+                const node = listStack.pop();
+                const nodeHtml = `<${node.tag}>${node.items.join("")}</${node.tag}>`;
+                if (listStack.length) {
+                    const parent = listStack[listStack.length - 1];
+                    if (parent.items.length) {
+                        // attach nested list HTML into last <li> of parent
+                        parent.items[parent.items.length - 1] = parent.items[parent.items.length - 1].slice(0, -5) + nodeHtml + `</li>`;
+                    } else {
+                        parent.items.push(`<li>${nodeHtml}</li>`);
+                    }
+                } else {
+                    htmlParts.push(nodeHtml);
+                }
             }
-            listItems = [];
-            listTag = null;
         }
 
         function flushBlockquote() {
@@ -3560,10 +3570,27 @@
             blockquoteLines = [];
         }
 
+        function getNextListTag(startIndex) {
+            for (let nextIndex = startIndex; nextIndex < lines.length; nextIndex += 1) {
+                const nextStripped = lines[nextIndex].trim();
+                if (!nextStripped) continue;
+                if (placeholders[nextStripped]) return null;
+                if (/^[-*]\s+(.*)$/.test(nextStripped)) return "ul";
+                if (/^\d+\.\s+(.*)$/.test(nextStripped)) return "ol";
+                return null;
+            }
+            return null;
+        }
+
         while (index < lines.length) {
             const line = lines[index];
             const stripped = line.trim();
             if (!stripped) {
+                const nextListTag = getNextListTag(index + 1);
+                if (listTag && nextListTag === listTag) {
+                    index += 1;
+                    continue;
+                }
                 flushParagraph();
                 flushList();
                 flushBlockquote();
@@ -3637,15 +3664,39 @@
 
             flushBlockquote();
 
-            const ulMatch = stripped.match(/^[-*]\s+(.*)$/);
-            const olMatch = stripped.match(/^\d+\.\s+(.*)$/);
+            const leading = line.match(/^[ \t]*/)[0] || "";
+            const indent = leading.replace(/\t/g, "    ").length;
+            const ulMatch = line.match(/^[ \t]*[-*]\s+(.*)$/);
+            const olMatch = line.match(/^[ \t]*(\d+)\.\s+(.*)$/);
             if (ulMatch || olMatch) {
                 flushParagraph();
                 const tag = ulMatch ? "ul" : "ol";
-                const item = ulMatch ? ulMatch[1] : olMatch[1];
-                if (listTag && listTag !== tag) flushList();
-                listTag = tag;
-                listItems.push(`<li>${item}</li>`);
+                const item = ulMatch ? ulMatch[1] : olMatch[2];
+                if (!listStack.length) {
+                    listStack.push({ tag, indent, items: [`<li>${item}</li>`] });
+                } else {
+                    while (listStack.length && indent < listStack[listStack.length - 1].indent) {
+                        const node = listStack.pop();
+                        const nodeHtml = `<${node.tag}>${node.items.join("")}</${node.tag}>`;
+                        if (listStack.length) {
+                            const parent = listStack[listStack.length - 1];
+                            if (parent.items.length) {
+                                parent.items[parent.items.length - 1] = parent.items[parent.items.length - 1].slice(0, -5) + nodeHtml + `</li>`;
+                            } else {
+                                parent.items.push(`<li>${nodeHtml}</li>`);
+                            }
+                        } else {
+                            htmlParts.push(nodeHtml);
+                        }
+                    }
+
+                    if (listStack.length && indent === listStack[listStack.length - 1].indent && tag === listStack[listStack.length - 1].tag) {
+                        listStack[listStack.length - 1].items.push(`<li>${item}</li>`);
+                    } else {
+                        listStack.push({ tag, indent, items: [`<li>${item}</li>`] });
+                    }
+                }
+
                 index += 1;
                 continue;
             }

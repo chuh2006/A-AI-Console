@@ -20,9 +20,9 @@ class LLMFactory:
             return GeminiClient(api_key=keys["gemini"], model_name=model_name)
         elif "qwen" in model_name:
             return QwenClient(api_key=keys["qwen"], model_name=model_name, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
-        elif "doubao" in model_name:
+        elif "doubao" in model_name or model_name == "deepseek-v3-2-251201":
             return VolcengineClient(api_key=keys["doubao"], model_name=model_name, base_url="https://ark.cn-beijing.volces.com/api/v3")
-        elif "deepseek" in model_name:
+        elif "deepseek" in model_name and model_name != "deepseek-v3-2-251201":
             return OpenAIClient(api_key=keys["deepseek"], model_name=model_name, base_url="https://api.deepseek.com")
         elif "kimi" in model_name:
             return OpenAIClient(api_key=keys["kimi"], model_name=model_name, base_url="https://api.moonshot.cn/v1")

@@ -5,7 +5,7 @@ import time
 import os
 import base64
 from .llm_base import BaseLLMClient
-from tools.vision_tools import ocr_tool_schema, perform_ocr
+from tools.vision_tools import ocr_tool_schema, perform_ocr, object_detection, object_detection_tool_schema
 from tools.web_search_ds import web_search_tool_schema, search_web
 from tools.prompts import Prompts
 from tools.kimi_tools import kimi_web_search_tool_schema, search_impl
@@ -270,8 +270,9 @@ class OpenAIClient(BaseLLMClient):
         if using_deepseek:
             if image_paths:
                 paths_str = "、".join(image_paths)
-                req_messages[-1]["content"] += f"\n\n[系统提示：用户随附了本地图片，路径为：{paths_str}。如有必要，请调用 perform_ocr 工具读取其文字。]"
+                req_messages[-1]["content"] += f"\n\n[系统提示：用户随附了本地图片，路径为：{paths_str}。如有必要，请调用 perform_ocr 工具或 object_detection 工具读取其文字或检测对象。]"
                 tools.append(ocr_tool_schema)
+                tools.append(object_detection_tool_schema)
             if kwargs.get("enable_enhanced_thinking", False):
                 tools.append(get_user_schema)
             if kwargs.get("enable_thinking", False):
@@ -468,11 +469,12 @@ class OpenAIClient(BaseLLMClient):
                         tc["function"]["name"] = "max_tool_calls_exceeded"
                     if tc["function"]["name"] == "perform_ocr":
                         tool_status = "success"
+                        loop_count -= 1  # OCR 工具调用不计入迭代次数限制
                         try:
                             args = json.loads(tc["function"]["arguments"])
-                            target_path = args.get("image_path", "")
+                            target_path = args.get("image_path", [])
                         except json.JSONDecodeError:
-                            target_path = ""
+                            target_path = []
                         
                         yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 正在提取图片文本: {target_path}...\033[0m\n"} if not using_deepseek_agent else None
                         ocr_result = perform_ocr(target_path)
@@ -493,6 +495,31 @@ class OpenAIClient(BaseLLMClient):
                             "status": "success"
                         })
                         req_tool_calls.append(add_on)
+                    elif tc["function"]["name"] == "object_detection":
+                        loop_count -= 1  # 对象检测工具调用不计入迭代次数限制
+                        try:
+                            args = json.loads(tc["function"]["arguments"])
+                            target_path = args.get("image_path", [])
+                        except json.JSONDecodeError:
+                            target_path = []
+                        yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 正在进行对象检测: {target_path}...\033[0m\n"} if not using_deepseek_agent else None
+                        detection_result = object_detection(target_path)
+                        status = detection_result.get("result", "error")
+                        message = detection_result.get("message", "")
+                        yield {"type": "system", "content": f"目标检测完成，状态: {status}"} if not using_deepseek_agent else None
+                        add_on = {
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": message
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
+                        req_tool_calls.append(add_on)
+                        tool_call_history.append({
+                            "name": tc["function"]["name"],
+                            "status": "success",
+                        })
+
                     elif tc["function"]["name"] == "search_web":
                         if kwargs.get("searchEffort", "time_only") == "time_only":
                             search_results = {"results": "Error: 搜索功能未被用户启用，无法执行搜索。本轮请勿再次尝试调用该工具", "sources": []}

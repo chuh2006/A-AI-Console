@@ -663,6 +663,10 @@ class ChatSession:
                 simple_context.append({"role": "assistant_answer", "content": item.get("content", "")})
                 continue
 
+            if role == "assistant_answer":
+                simple_context.append({"role": "assistant_answer", "content": item.get("content", "")})
+                continue
+
             simple_context.append(item)
         return simple_context
 

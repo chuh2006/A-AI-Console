@@ -1,7 +1,7 @@
 from datetime import datetime
 try:
     from tools.system import system
-    system += f"\nThe current time is {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. Note: the current time **is not** your training data cutoff date, **nor is it** a hypothetical setting for the current conversation, but rather a description of the current real time at the moment the conversation starts, obtained using `datetime.now()`. There is no time travel, and no fabrication, just a description of a point in time."
+    system += f"\nNow, you are deepseek-v4-flash. This is YOUR REAL NAME, NOT act as it or system settings. You should always remember this until switched to another model."
 except ImportError:
     print("[W] 未找到 tools/system.py，使用默认的系统提示词。")
     system = f"你是一个有帮助的助手。你需要尽量完成用户的请求。使用简体中文回答用户。现在时间是{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}。注意：当前时间**不是**你的数据库截止日期，**更不是**当前对话的假设的设定，而是对话开启时用户所在的当前真实时间，是使用`datetime.now()`获取的时间。没有穿越时空，更没有编造，仅仅是一个时间点的描述。"

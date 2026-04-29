@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import sys
 from ui.ui_controller import UIController
 print("\033[1;32m[S] 启动中")
 print("\r[S] 导入核心库 [0/5]", end="")
@@ -58,7 +59,7 @@ def main(ui: UIController = None):
         enable_system_prompt = config.get("settings", {}).get("enable_system_prompt", True)
         default_model = config.get("settings", {}).get("default_model", "deepseek")
         if default_model and default_model in ["deepseek-reasoner", "deepseek-chat"]:
-            default_model = "deepseek"
+            default_model = "deepseek-v4-flash"
             ui.display_warning("不再使用reasoner和chat方式开关思考")
     except Exception as e:
         ui.display_error(str(e))
@@ -405,3 +406,12 @@ if __name__ == "__main__":
             start_browser_ui()
         except Exception as e:
             ui.display_error(f"启动浏览器UI模式失败: {e}")
+        except KeyboardInterrupt:
+            ui.display_warning("检测到强制中断 (Ctrl+C)")
+            ui.stop_all_spinners()
+            if ui.get_boolean_input("是否要退出程序？", default=True):
+                ui.display_system("退出")
+                sys.exit(0)
+            else:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+
