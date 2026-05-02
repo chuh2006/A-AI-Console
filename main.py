@@ -57,10 +57,10 @@ def main(ui: UIController = None):
         keys = config.get("api_keys", {})
         temperature = config.get("settings", {}).get("default_temperature", 1.0)
         enable_system_prompt = config.get("settings", {}).get("enable_system_prompt", True)
-        default_model = config.get("settings", {}).get("default_model", "deepseek")
-        if default_model and default_model in ["deepseek-reasoner", "deepseek-chat"]:
+        default_model = config.get("settings", {}).get("default_model", "deepseek-v4-flash")
+        if default_model and default_model in ["deepseek-reasoner", "deepseek-chat", "deepseek"]:
             default_model = "deepseek-v4-flash"
-            ui.display_warning("不再使用reasoner和chat方式开关思考")
+            ui.display_warning("不再使用reasoner和chat")
     except Exception as e:
         ui.display_error(str(e))
         return

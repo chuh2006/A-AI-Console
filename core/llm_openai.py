@@ -258,6 +258,7 @@ class OpenAIClient(BaseLLMClient):
         history_messages: List[Dict] = []  # 记录本轮 assistant/tool 的真实顺序消息
         reasoning_effort_dict = {"1": "high", "2": "max"} # deepseek-v4 的思考深度
         reasoning_effort = "high" # 默认思考深度
+        tool_choice: str = None # 控制ds调用 tool 的行为。
 
         # test:
         if using_deepseek_agent:
@@ -278,6 +279,11 @@ class OpenAIClient(BaseLLMClient):
             if kwargs.get("enable_thinking", False):
                 extra_body["thinking"] = {"type": "enabled"}
                 reasoning_effort = reasoning_effort_dict.get(kwargs.get("reasoningEffort"), "high")
+            if tools is not None and len(tools) > 0:
+                tool_choice = "auto"
+            else:
+                tool_choice = "none"
+            
 
         if using_kimi:
             if "kimi-k2.5" in self.model_name:
@@ -355,7 +361,8 @@ class OpenAIClient(BaseLLMClient):
                 stream=True,
                 extra_body=extra_body,
                 tools=tools if tools else None,
-                reasoning_effort=reasoning_effort if using_deepseek else None
+                reasoning_effort=reasoning_effort if using_deepseek else None,
+                tool_choice=tool_choice if using_deepseek else None,
             )
             
             # 初始化当前轮次的缓存
