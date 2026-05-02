@@ -279,10 +279,7 @@ class OpenAIClient(BaseLLMClient):
             if kwargs.get("enable_thinking", False):
                 extra_body["thinking"] = {"type": "enabled"}
                 reasoning_effort = reasoning_effort_dict.get(kwargs.get("reasoningEffort"), "high")
-            if tools is not None and len(tools) > 0:
-                tool_choice = "auto"
-            else:
-                tool_choice = "none"
+            
             
 
         if using_kimi:
@@ -335,6 +332,12 @@ class OpenAIClient(BaseLLMClient):
             if not isinstance(message, dict):
                 return
             history_messages.append(dict(message))
+        
+        if using_deepseek:
+            if tools is not None and len(tools) > 0:
+                tool_choice = "auto"
+            else:
+                tool_choice = "none"
 
         # ====================================================
         # 进入多轮 Tool Calling 循环
