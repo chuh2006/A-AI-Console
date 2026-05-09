@@ -25,12 +25,22 @@ def pick_available_port(host: str, preferred_port: int) -> int:
                 return port
     raise RuntimeError(f"从端口 {preferred_port} 开始，连续 20 个端口都不可用。")
 
+def get_local_ip() -> str:
+    choice = input("请选择要绑定的IP地址:\n1. localhost\n2. any\n3. 其他 (请输入IP地址)\n请输入选项> ").strip()
+    if choice == "1":
+        return "127.0.0.1"
+    elif choice == "2":
+        return "0.0.0.0"
+    else:
+        return input("请输入IP地址: ").strip()
 
 def main() -> None:
     project_root = os.path.dirname(os.path.abspath(__file__))
     config = load_config(project_root)
-
-    host = "127.0.0.1"
+    host = get_local_ip()
+    print(f"正在绑定到 {host}...")
+    if not host:
+        host = "0.0.0.0"
     port = pick_available_port(host, 8765)
     controller = BrowserUIController(project_root=project_root, config=config)
     webbrowser.open(f"http://{host}:{port}")

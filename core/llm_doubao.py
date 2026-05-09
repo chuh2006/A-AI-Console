@@ -116,6 +116,7 @@ class VolcengineClient(BaseLLMClient):
             role = str(msg.get("role", "")).strip()
             if role == "system":
                 sys_prompt = self._stringify_content(msg.get("content", ""))
+                continue # 系统消息不直接加入历史
                 if sys_prompt:
                     ark_history.append(self._input_text_message("system", sys_prompt))
                 continue
