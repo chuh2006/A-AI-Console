@@ -14,6 +14,8 @@ from tools.make_new_function_tool import create_new_tool_schema, create_new_tool
 from tools.run_new_function import run_func
 from tools.get_user import get_user_schema, get_user
 from tools.think_abstract import think_abstract_schema, think_abstract
+from tools.image_gen import build_image_gen_tool_result, coerce_image_prompt, image_gen_tool_schema
+from .llm_seedream import SeedreamImageGenerator
 
 class OpenAIClient(BaseLLMClient):
     def _stringify_content(self, content) -> str:
@@ -256,6 +258,7 @@ class OpenAIClient(BaseLLMClient):
         tool_call_history: List[Dict] = []  # 用于记录所有工具调用的历史，包括工具名称、参数和返回结果，以便后续分析和调试
         req_tool_calls: List[Dict] = []  # 存储传给模型的工具调用结果，加入到上下文中，以供模型参考，避免重复调用同一工具
         history_messages: List[Dict] = []  # 记录本轮 assistant/tool 的真实顺序消息
+        image_jobs = []
         reasoning_effort_dict = {"1": "high", "2": "max"} # deepseek-v4 的思考深度
         reasoning_effort = "high" # 默认思考深度
         tool_choice: str = None # 控制ds调用 tool 的行为。
@@ -279,6 +282,13 @@ class OpenAIClient(BaseLLMClient):
             if kwargs.get("enable_thinking", False):
                 extra_body["thinking"] = {"type": "enabled"}
                 reasoning_effort = reasoning_effort_dict.get(kwargs.get("reasoningEffort"), "high")
+            if kwargs.get("enable_image_generation", False):
+                tools.append(image_gen_tool_schema)
+                req_messages[-1]["content"] += (
+                    "\n\n[系统提示：用户已启用 image_gen 生图工具。"
+                    "当用户需要生成、绘制、设计或改图时，请调用 image_gen，"
+                    "并把完整生图提示词放入 prompt。工具提交成功后，图片会在后台完成并展示。]"
+                )
             
             
 
@@ -686,6 +696,50 @@ class OpenAIClient(BaseLLMClient):
                         req_messages.append(add_on)
                         append_history_message(add_on)
 
+                    elif tc["function"]["name"] == "image_gen":
+                        tool_status = "submitted"
+                        try:
+                            args = json.loads(tc["function"]["arguments"] or "{}")
+                        except json.JSONDecodeError:
+                            args = {}
+                        prompt_text = coerce_image_prompt(args)
+                        try:
+                            generator = SeedreamImageGenerator(
+                                api_key=getattr(self, "provider_keys", {}).get("doubao", ""),
+                            )
+                            job = generator.start(
+                                prompt=prompt_text,
+                                model=kwargs.get("image_model", "doubao-seedream-5-0-260128"),
+                                image_paths=image_paths or [],
+                                size=kwargs.get("image_resolution", "2K"),
+                                count=kwargs.get("requested_image_count", 1),
+                                enable_search=kwargs.get("image_enable_search", False),
+                                output_format=kwargs.get("output_format", "jpeg"),
+                            )
+                            image_jobs.append(job)
+                            yield {"type": "image_placeholder", "count": job.requested_count}
+                            tool_result = build_image_gen_tool_result(
+                                job_id=job.id,
+                                requested_count=job.requested_count,
+                                model=job.model,
+                            )
+                        except Exception as exc:
+                            tool_status = "failed"
+                            tool_result = f"Error: image_gen 生图任务提交失败：{exc}"
+
+                        add_on = {
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": tool_result,
+                        }
+                        req_messages.append(add_on)
+                        append_history_message(add_on)
+                        req_tool_calls.append(add_on)
+                        tool_call_history.append({
+                            "name": tc["function"]["name"],
+                            "status": tool_status,
+                        })
+
                     elif tc["function"]["name"] == "create_tool":
                         yield {"type": "system", "content": f"\033[94m[第 {loop_count} 轮 | 请求工具] 收到创建工具请求，名称: {tc['function']['arguments']}...\033[0m\n"}
                         args = json.loads(tc["function"]["arguments"])
@@ -774,6 +828,48 @@ class OpenAIClient(BaseLLMClient):
             else:
                 # 如果没有触发工具，说明模型已经给出了最终答案，跳出循环
                 break
+        if image_jobs:
+            generated_images = []
+            image_failures = []
+            emitted_index = 0
+            for job in image_jobs:
+                if not job.done.is_set():
+                    yield {
+                        "type": "system",
+                        "content": f"Seedream 生图任务 {job.id} 已提交，正在等待图片生成完成...\n",
+                    }
+                job.done.wait()
+                for path in job.generated_paths:
+                    generated_images.append(path)
+                    yield {
+                        "type": "image_generated",
+                        "index": emitted_index,
+                        "image_path": path,
+                        "size": job.size,
+                    }
+                    emitted_index += 1
+                for failure in job.failures:
+                    error_text = failure.get("error", job.error or "图片生成失败")
+                    image_failures.append({"index": emitted_index, "error": error_text})
+                    yield {
+                        "type": "image_failed",
+                        "index": emitted_index,
+                        "error": error_text,
+                    }
+                    emitted_index += 1
+                if job.error and not job.generated_paths:
+                    image_failures.append({"index": emitted_index, "error": job.error})
+                    yield {
+                        "type": "image_failed",
+                        "index": emitted_index,
+                        "error": job.error,
+                    }
+                    emitted_index += 1
+            yield {
+                "type": "meta",
+                "generated_images": generated_images,
+                "image_failures": image_failures,
+            }
         if get_user_inputs or get_user_questions:
             yield {"type": "meta", "assistant_questions": get_user_questions, "user_inputs": get_user_inputs}
         if tool_call_history:

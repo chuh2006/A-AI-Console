@@ -23,7 +23,9 @@ class LLMFactory:
         elif "doubao" in model_name or model_name == "deepseek-v3-2-251201":
             return VolcengineClient(api_key=keys["doubao"], model_name=model_name, base_url="https://ark.cn-beijing.volces.com/api/v3")
         elif "deepseek" in model_name and model_name != "deepseek-v3-2-251201":
-            return OpenAIClient(api_key=keys["deepseek"], model_name=model_name, base_url="https://api.deepseek.com")
+            client = OpenAIClient(api_key=keys["deepseek"], model_name=model_name, base_url="https://api.deepseek.com")
+            client.provider_keys = keys
+            return client
         elif "kimi" in model_name:
             return OpenAIClient(api_key=keys["kimi"], model_name=model_name, base_url="https://api.moonshot.cn/v1")
         elif "minimax" in model_name.lower():

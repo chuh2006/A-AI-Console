@@ -1487,8 +1487,11 @@
     }
 
     function isSeedreamModel(meta = getCurrentModelMeta()) {
-        const modelId = String(meta?.id || "").trim();
-        return modelId === "doubao-seedream-5-0-260128" || modelId === "doubao-seedream-4-5-251128";
+        return (meta?.extra_fields || []).some((field) => field?.key === "enable_image_generation");
+    }
+
+    function isImageGenerationEnabled(meta = getCurrentModelMeta(), settings = getCurrentSettings()) {
+        return isSeedreamModel(meta) && settings?.extras?.enable_image_generation === true;
     }
 
     function getPendingImageAttachmentCount() {
@@ -1510,7 +1513,7 @@
     }
 
     function syncDynamicImageCountSetting(meta = getCurrentModelMeta(), settings = getCurrentSettings()) {
-        if (!isSeedreamModel(meta)) return;
+        if (!isImageGenerationEnabled(meta, settings)) return;
         const field = (meta.extra_fields || []).find((item) => item?.type === "image_count");
         if (!field) return;
         const normalizedValue = normalizeGeneratedImageCount(settings.extras[field.key], Number.parseInt(String(field.default || "1"), 10) || 1);
@@ -2813,7 +2816,7 @@
             return;
         }
 
-        if (isSeedreamModel(meta) && getAvailableGeneratedImageCount() <= 0) {
+        if (isImageGenerationEnabled(meta, settings) && getAvailableGeneratedImageCount() <= 0) {
             showToast("当前图片数量已达到上限", "error");
             return;
         }
@@ -3081,7 +3084,11 @@
             setActiveKind("process");
             activeProcessHost = document.createElement("div");
             activeProcessHost.className = "live-activity-host";
-            streamSequence.appendChild(activeProcessHost);
+            if (activeImageHost && activeImageHost.isConnected) {
+                streamSequence.insertBefore(activeProcessHost, activeImageHost);
+            } else {
+                streamSequence.appendChild(activeProcessHost);
+            }
             return activeProcessHost;
         }
 

@@ -36,10 +36,6 @@ from ui.browser_mode import BrowserCSSMixin, BrowserIndexPageMixin, BrowserJSMix
 
 class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin):
     IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
-    IMAGE_MODEL_IDS = {
-        "doubao-seedream-5-0-260128",
-        "doubao-seedream-4-5-251128",
-    }
     THEME_OPTIONS = [
         {"id": "orange", "label": "橙色", "swatch": "#d97757"},
         {"id": "green", "label": "绿色", "swatch": "#2d8a63"},
@@ -1263,7 +1259,11 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             thinking_value=thinking_value,
             extras=extras,
         )
-        enabled_tools = ["web_search"] if extra_kwargs.get("enable_search") else []
+        enabled_tools = []
+        if extra_kwargs.get("enable_search"):
+            enabled_tools.append("web_search")
+        if extra_kwargs.get("enable_image_generation"):
+            enabled_tools.append("image_gen")
         current_time_value = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         state.session.add_user_message(
@@ -1693,6 +1693,21 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             if extras.get("enable_search"):
                 extra_kwargs["enable_search"] = True
                 extra_kwargs["searchEffort"] = str(extras.get("search_effort", "low")) if extra_kwargs.get("enable_thinking") else "minimal"
+            if extras.get("enable_image_generation"):
+                image_model = str(extras.get("image_model", "doubao-seedream-5-0-260128") or "").strip()
+                if image_model not in {"doubao-seedream-5-0-260128", "doubao-seedream-4-5-251128"}:
+                    image_model = "doubao-seedream-5-0-260128"
+                extra_kwargs["enable_image_generation"] = True
+                extra_kwargs["image_model"] = image_model
+                extra_kwargs["image_resolution"] = self._normalize_seedream_resolution(
+                    extras.get("image_resolution", "2K"),
+                    image_model,
+                )
+                extra_kwargs["image_enable_search"] = bool(extras.get("image_enable_search", False))
+                extra_kwargs["requested_image_count"] = self._normalize_seedream_image_count(extras.get("max_images", 1))
+                output_format = str(extras.get("output_format", "jpeg") or "jpeg").strip().lower()
+                if output_format in {"jpeg", "png", "webp"}:
+                    extra_kwargs["output_format"] = output_format
 
         
 
@@ -1715,24 +1730,6 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
             if extra_kwargs["enable_search"]:
                 extra_kwargs["search_strategy"] = str(extras.get("search_strategy", "turbo"))
-
-        elif normalized_selected_model in self.IMAGE_MODEL_IDS:
-            extra_kwargs["resolution"] = self._normalize_seedream_resolution(
-                thinking_value,
-                normalized_selected_model,
-            )
-            extra_kwargs["enable_image_thinking"] = bool(extras.get("enable_image_thinking", True))
-            requested_image_count = self._normalize_seedream_image_count(extras.get("max_images", 1))
-            extra_kwargs["requested_image_count"] = requested_image_count
-            if normalized_selected_model == "doubao-seedream-5-0-260128":
-                extra_kwargs["enable_search"] = bool(extras.get("enable_search", False))
-                output_format = str(extras.get("output_format", "jpeg") or "jpeg").strip().lower()
-                if output_format in {"jpeg", "png", "webp"}:
-                    extra_kwargs["output_format"] = output_format
-
-            if requested_image_count > 1:
-                extra_kwargs["sequential_image_generation"] = "auto"
-                extra_kwargs["sequential_image_generation_options"] = {"max_images": requested_image_count}
 
         elif "doubao" in normalized_selected_model:
             extra_kwargs["reasoningEffort"] = str(thinking_value or "medium")
@@ -2090,6 +2087,10 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
 
         if "OCR返回结果" in message or "本地OCR返回结果" in message:
             self._finish_live_tool_history(live_tool_history, "ocr", "success")
+            return
+
+        if "Seedream 生图任务" in message and "等待图片生成完成" in message:
+            self._push_live_tool_history(live_tool_history, {"name": "image_gen", "status": "running"})
             return
 
         if "请求工具" in message and "获取用户进一步输入" in message:
@@ -2638,6 +2639,65 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                         ],
                     },
                     {"key": "interactive_thinking", "type": "boolean", "label": "交互式思考", "default": False},
+                    {"key": "enable_image_generation", "type": "boolean", "label": "生图", "default": False},
+                    {
+                        "key": "image_model",
+                        "type": "select",
+                        "label": "Seedream 模型",
+                        "default": "doubao-seedream-5-0-260128",
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                        "options": [
+                            {"value": "doubao-seedream-5-0-260128", "label": "Seedream 5.0"},
+                            {"value": "doubao-seedream-4-5-251128", "label": "Seedream 4.5"},
+                        ],
+                    },
+                    {
+                        "key": "image_enable_search",
+                        "type": "boolean",
+                        "label": "生图搜索",
+                        "default": False,
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                    },
+                    {
+                        "key": "image_resolution",
+                        "type": "select",
+                        "label": "画面比例",
+                        "default": "2K",
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                        "options": [
+                            {"value": "2K", "label": "默认 2K"},
+                            {"value": "1024x1024", "label": "1:1"},
+                            {"value": "1536x1024", "label": "3:2"},
+                            {"value": "1024x1536", "label": "2:3"},
+                            {"value": "2048x1536", "label": "4:3"},
+                            {"value": "1536x2048", "label": "3:4"},
+                        ],
+                    },
+                    {
+                        "key": "max_images",
+                        "type": "image_count",
+                        "label": "生成张数",
+                        "default": "1",
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                        "options": [
+                            {"value": "1", "label": "1"},
+                            {"value": "2", "label": "2"},
+                            {"value": "3", "label": "3"},
+                            {"value": "4", "label": "4"},
+                        ],
+                    },
+                    {
+                        "key": "output_format",
+                        "type": "select",
+                        "label": "图片格式",
+                        "default": "jpeg",
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                        "options": [
+                            {"value": "jpeg", "label": "JPEG"},
+                            {"value": "png", "label": "PNG"},
+                            {"value": "webp", "label": "WEBP"},
+                        ],
+                    },
                 ],
             },
             {
@@ -2671,6 +2731,65 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                         ],
                     },
                     {"key": "interactive_thinking", "type": "boolean", "label": "交互式思考", "default": False},
+                    {"key": "enable_image_generation", "type": "boolean", "label": "生图", "default": False},
+                    {
+                        "key": "image_model",
+                        "type": "select",
+                        "label": "Seedream 模型",
+                        "default": "doubao-seedream-5-0-260128",
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                        "options": [
+                            {"value": "doubao-seedream-5-0-260128", "label": "Seedream 5.0"},
+                            {"value": "doubao-seedream-4-5-251128", "label": "Seedream 4.5"},
+                        ],
+                    },
+                    {
+                        "key": "image_enable_search",
+                        "type": "boolean",
+                        "label": "生图搜索",
+                        "default": False,
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                    },
+                    {
+                        "key": "image_resolution",
+                        "type": "select",
+                        "label": "画面比例",
+                        "default": "2K",
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                        "options": [
+                            {"value": "2K", "label": "默认 2K"},
+                            {"value": "1024x1024", "label": "1:1"},
+                            {"value": "1536x1024", "label": "3:2"},
+                            {"value": "1024x1536", "label": "2:3"},
+                            {"value": "2048x1536", "label": "4:3"},
+                            {"value": "1536x2048", "label": "3:4"},
+                        ],
+                    },
+                    {
+                        "key": "max_images",
+                        "type": "image_count",
+                        "label": "生成张数",
+                        "default": "1",
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                        "options": [
+                            {"value": "1", "label": "1"},
+                            {"value": "2", "label": "2"},
+                            {"value": "3", "label": "3"},
+                            {"value": "4", "label": "4"},
+                        ],
+                    },
+                    {
+                        "key": "output_format",
+                        "type": "select",
+                        "label": "图片格式",
+                        "default": "jpeg",
+                        "show_when": {"key": "enable_image_generation", "equals": True},
+                        "options": [
+                            {"value": "jpeg", "label": "JPEG"},
+                            {"value": "png", "label": "PNG"},
+                            {"value": "webp", "label": "WEBP"},
+                        ],
+                    },
                 ],
             },
             {
@@ -2861,58 +2980,6 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                         "label": "高速模式",
                         "description": "相同质量，1.5倍速回答，2倍token消耗",
                         "default": False,
-                    },
-                ],
-            },
-            {
-                "id": "doubao-seedream-5-0-260128",
-                "label": "Seedream 5.0",
-                "supports_attachments": True,
-                "thinking": self._seedream_resolution_options(default="2K", high_label="3K"),
-                "extra_fields": [
-                    {"key": "enable_search", "type": "boolean", "label": "Web Search", "default": False},
-                    {
-                        "key": "output_format",
-                        "type": "select",
-                        "label": "Output Format",
-                        "default": "jpeg",
-                        "options": [
-                            {"value": "jpeg", "label": "JPEG"},
-                            {"value": "png", "label": "PNG"},
-                            {"value": "webp", "label": "WEBP"},
-                        ],
-                    },
-                    {
-                        "key": "max_images",
-                        "type": "image_count",
-                        "label": "生成张数",
-                        "default": "1",
-                        "options": [
-                            {"value": "1", "label": "1"},
-                            {"value": "2", "label": "2"},
-                            {"value": "3", "label": "3"},
-                            {"value": "4", "label": "4"},
-                        ],
-                    },
-                ],
-            },
-            {
-                "id": "doubao-seedream-4-5-251128",
-                "label": "Seedream 4.5",
-                "supports_attachments": True,
-                "thinking": self._seedream_resolution_options(default="2K", high_label="4K"),
-                "extra_fields": [
-                    {
-                        "key": "max_images",
-                        "type": "image_count",
-                        "label": "生成张数",
-                        "default": "1",
-                        "options": [
-                            {"value": "1", "label": "1"},
-                            {"value": "2", "label": "2"},
-                            {"value": "3", "label": "3"},
-                            {"value": "4", "label": "4"},
-                        ],
                     },
                 ],
             },
