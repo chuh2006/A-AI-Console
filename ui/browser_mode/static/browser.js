@@ -19,6 +19,7 @@
             auto_collapse_output_meta: false,
             localized_save: true,
         },
+        enableSystemPrompt: true,
     };
     const state = {
         sessionId: null,
@@ -54,6 +55,7 @@
             auto_collapse_output_meta: false,
             localized_save: true,
         },
+        enableSystemPrompt: true,
     };
     const refs = {
         conversation: document.getElementById("conversation"),
@@ -113,6 +115,7 @@
         settingsSidebar: document.getElementById("settings-sidebar"),
         settingsThemeSlot: document.getElementById("settings-theme-slot"),
         settingsCloseButton: document.getElementById("settings-close-button"),
+        systemPromptToggle: document.getElementById("system-prompt-toggle"),
         imageLightboxOverlay: document.getElementById("image-lightbox-overlay"),
         imageLightboxImage: document.getElementById("image-lightbox-image"),
         imageLightboxCaption: document.getElementById("image-lightbox-caption"),
@@ -129,6 +132,7 @@
         mountSettingsFields();
         initializeTheme();
         initializeBrowserPreferences();
+        initializeSystemPromptSetting();
         initializeModelState();
         bindEvents();
         installComposerLayoutObserver();
@@ -206,6 +210,9 @@
         refs.browserPreferenceInputs.forEach((input) => {
             input.addEventListener("change", onBrowserPreferenceInputChange);
         });
+        if (refs.systemPromptToggle) {
+            refs.systemPromptToggle.addEventListener("change", onSystemPromptToggleChange);
+        }
         if (refs.contextUsageDetailButton) {
             refs.contextUsageDetailButton.addEventListener("click", (event) => {
                 event.stopPropagation();
@@ -408,6 +415,7 @@
     function setContextMessages(messages) {
         state.contextMessages = cloneContextMessages(messages);
         renderContextUsage();
+        syncSystemPromptToggle();
     }
 
     function setTotalConversationTokens(value) {
@@ -652,6 +660,24 @@
         });
     }
 
+    function initializeSystemPromptSetting() {
+        state.enableSystemPrompt = bootstrap.enableSystemPrompt !== false;
+        syncSystemPromptToggle();
+    }
+
+    function syncSystemPromptToggle() {
+        if (!refs.systemPromptToggle) return;
+        refs.systemPromptToggle.checked = !!state.enableSystemPrompt;
+        refs.systemPromptToggle.disabled = !canChangeSystemPromptForCurrentSession();
+    }
+
+    function canChangeSystemPromptForCurrentSession() {
+        return !state.isStreaming && state.contextMessages.every((message) => {
+            const role = String(message?.role || "");
+            return role !== "user" && role !== "assistant";
+        });
+    }
+
     function toggleSettingsSidebar() {
         if (refs.settingsOverlay.classList.contains("is-open")) {
             closeSettingsSidebar();
@@ -763,6 +789,47 @@
                 applyOutputPreferenceState(refs.conversation, { animate: true });
             }
             showToast(error.message || "设置保存失败", "error");
+        }
+    }
+
+    async function onSystemPromptToggleChange(event) {
+        if (!refs.systemPromptToggle) return;
+        if (!canChangeSystemPromptForCurrentSession()) {
+            event.target.checked = !!state.enableSystemPrompt;
+            syncSystemPromptToggle();
+            showToast("系统提示词只能在发送第一条消息前调整", "info");
+            return;
+        }
+
+        const previousValue = !!state.enableSystemPrompt;
+        const nextValue = !!event.target.checked;
+        state.enableSystemPrompt = nextValue;
+        syncSystemPromptToggle();
+
+        if (!state.sessionId) return;
+        try {
+            const response = await fetch("/api/session/system-prompt", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    session_id: state.sessionId,
+                    enable_system_prompt: nextValue,
+                }),
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || "系统提示词设置失败");
+            state.enableSystemPrompt = payload.enable_system_prompt !== false;
+            if (Array.isArray(payload.context_messages)) {
+                setContextMessages(payload.context_messages);
+            }
+            if (typeof payload.total_tokens === "number") {
+                setTotalConversationTokens(payload.total_tokens);
+            }
+            renderContextUsage();
+        } catch (error) {
+            state.enableSystemPrompt = previousValue;
+            syncSystemPromptToggle();
+            showToast(error.message || "系统提示词设置失败", "error");
         }
     }
 
@@ -945,10 +1012,16 @@
     }
 
     async function createSession() {
-        const response = await fetch("/api/session/new", { method: "POST" });
+        const response = await fetch("/api/session/new", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enable_system_prompt: !!state.enableSystemPrompt }),
+        });
         if (!response.ok) throw new Error("无法创建浏览器会话");
         const payload = await response.json();
         state.sessionId = payload.session_id;
+        state.enableSystemPrompt = payload.enable_system_prompt !== false;
+        syncSystemPromptToggle();
         setContextMessages(payload.context_messages || []);
         setTotalConversationTokens(payload.total_tokens || 0);
         setLatestAssistantThinking(payload.latest_assistant_thinking || "");
@@ -1734,10 +1807,16 @@
     }
 
     async function createSession() {
-        const response = await fetch("/api/session/new", { method: "POST" });
+        const response = await fetch("/api/session/new", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enable_system_prompt: !!state.enableSystemPrompt }),
+        });
         if (!response.ok) throw new Error("无法创建浏览器会话");
         const payload = await response.json();
         state.sessionId = payload.session_id;
+        state.enableSystemPrompt = payload.enable_system_prompt !== false;
+        syncSystemPromptToggle();
         setCurrentSavedBasename("", { refreshRecords: false });
         refreshTurnNavigator();
         setConversationTitle(payload.title || "新对话");
@@ -2749,6 +2828,7 @@
         state.isStreaming = true;
         state.followStreaming = isAtPageBottom();
         updateSendButtonState();
+        syncSystemPromptToggle();
         closeAllMenus();
         closeRecordActionMenu();
 
@@ -2764,6 +2844,7 @@
             thinking: settings.thinking,
             extras: settings.extras,
             reference_images: referenceImagePaths,
+            enable_system_prompt: !!state.enableSystemPrompt,
         }));
         for (const item of state.attachments) formData.append("attachments", item.file, item.file.name);
 
@@ -2823,6 +2904,7 @@
             state.stopStreamRequested = false;
             state.streamStopBlocked = false;
             updateSendButtonState();
+            syncSystemPromptToggle();
             focusComposerInput();
         }
     }

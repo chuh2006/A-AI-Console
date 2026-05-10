@@ -19,6 +19,7 @@ class BrowserIndexPageMixin:
                 "accentOptions": self.ACCENT_OPTIONS,
             },
             "browserPreferences": self.browser_preferences,
+            "enableSystemPrompt": self.enable_system_prompt,
         }
         bootstrap_json = json.dumps(bootstrap, ensure_ascii=False).replace("</", "<\\/")
         html_template = self._browser_static_path("index.html").read_text(encoding="utf-8")

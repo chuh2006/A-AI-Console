@@ -20,6 +20,33 @@ class ChatSession:
             self.history.append({"role": "system", "content": system_prompt})
             self.full_context.append({"role": "system", "content": system_prompt})
 
+    def set_initial_system_prompt(self, system_prompt: str, enabled: bool):
+        if any(msg.get("role") in {"user", "assistant", "tool"} for msg in self.history if isinstance(msg, dict)):
+            raise ValueError("system prompt can only be changed before the first user message")
+
+        self.history = [
+            msg
+            for msg in self.history
+            if not (isinstance(msg, dict) and msg.get("role") == "system")
+        ]
+        self.full_context = [
+            msg
+            for msg in self.full_context
+            if not (isinstance(msg, dict) and msg.get("role") == "system")
+        ]
+
+        if not enabled or not system_prompt:
+            return
+
+        self.history.insert(0, {"role": "system", "content": system_prompt})
+        first_context_item = self.full_context[0] if self.full_context else {}
+        insert_index = (
+            1
+            if isinstance(first_context_item, dict) and first_context_item.get("role") == "directions"
+            else 0
+        )
+        self.full_context.insert(insert_index, {"role": "system", "content": system_prompt})
+
     def edit_system_prompt(self, new_prompt: str):
         for msg in self.history:
             if msg["role"] == "system":

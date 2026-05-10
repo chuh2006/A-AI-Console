@@ -11,6 +11,7 @@ class BrowserSessionState:
     session: ChatSession
     temperature: float
     selected_model: str
+    enable_system_prompt: bool = True
     title: str = ""
     saved_basename: str = ""
     epoch: int = 0

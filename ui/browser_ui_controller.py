@@ -65,7 +65,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         self.keys = config.get("api_keys", {})
         settings = config.get("settings", {})
         self.default_temperature = settings.get("default_temperature", 1.0)
-        self.enable_system_prompt = settings.get("enable_system_prompt", True)
+        self.enable_system_prompt = self._coerce_bool(settings.get("enable_system_prompt", True), True)
         self.model_catalog = self._build_model_catalog()
         default_model = self._normalize_browser_model_id(settings.get("default_model", "deepseek-v4-flash"))
         self.default_model = default_model if self._model_exists(default_model) else "deepseek-v4-flash"
@@ -122,7 +122,8 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         parsed = urlparse(handler.path)
         if parsed.path == "/api/session/new":
-            session = self._create_session()
+            payload = self._read_json_body(handler)
+            session = self._create_session(payload.get("enable_system_prompt"))
             self._send_json(
                 handler,
                 {
@@ -132,9 +133,15 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                     "context_messages": session.get("context_messages", []),
                     "total_tokens": session.get("total_tokens", 0),
                     "latest_assistant_thinking": session.get("latest_assistant_thinking", ""),
+                    "enable_system_prompt": session.get("enable_system_prompt", True),
                     "default_model": self.default_model,
                 },
             )
+            return
+        if parsed.path == "/api/session/system-prompt":
+            payload = self._read_json_body(handler)
+            session_id = str(payload.get("session_id", "")).strip()
+            self._handle_system_prompt_update_request(handler, session_id, payload)
             return
         if parsed.path == "/api/session/save":
             payload = self._read_json_body(handler)
@@ -184,18 +191,24 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             return
         self._send_json(handler, {"error": "Not found"}, status=404)
 
-    def _create_session(self) -> dict[str, Any]:
+    def _create_session(self, enable_system_prompt: Any = None) -> dict[str, Any]:
         session_id = uuid.uuid4().hex
         system_prompt = prompts.Prompts.universe_task_prompt
+        system_prompt_enabled = (
+            enable_system_prompt
+            if isinstance(enable_system_prompt, bool)
+            else self.enable_system_prompt
+        )
         session = ChatSession(
             system_prompt=system_prompt,
             first_time=True,
-            enable_system_prompt=self.enable_system_prompt,
+            enable_system_prompt=system_prompt_enabled,
         )
         state = BrowserSessionState(
             session=session,
             temperature=self.default_temperature,
             selected_model=self.default_model,
+            enable_system_prompt=system_prompt_enabled,
         )
         with self.sessions_lock:
             self.sessions[session_id] = state
@@ -206,6 +219,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
             "context_messages": self._serialize_context_messages(session.get_history()),
             "total_tokens": self._estimate_total_tokens(session),
             "latest_assistant_thinking": "",
+            "enable_system_prompt": system_prompt_enabled,
         }
 
     def _get_session_state(self, session_id: str) -> BrowserSessionState:
@@ -674,6 +688,51 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         self.browser_preferences.update(updates)
         self._send_json(handler, {"preferences": self.browser_preferences})
 
+    def _handle_system_prompt_update_request(
+        self,
+        handler: BaseHTTPRequestHandler,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if not session_id:
+            self._send_json(handler, {"error": "missing session_id"}, status=400)
+            return
+        if not isinstance(payload, dict) or not isinstance(payload.get("enable_system_prompt"), bool):
+            self._send_json(handler, {"error": "enable_system_prompt must be a boolean"}, status=400)
+            return
+
+        try:
+            state = self._get_session_state(session_id)
+        except KeyError as exc:
+            self._send_json(handler, {"error": str(exc)}, status=404)
+            return
+
+        enabled = bool(payload.get("enable_system_prompt"))
+        with state.lock:
+            if state.epoch > 0:
+                self._send_json(
+                    handler,
+                    {"error": "system prompt can only be changed before the first user message"},
+                    status=400,
+                )
+                return
+            try:
+                state.session.set_initial_system_prompt(prompts.Prompts.universe_task_prompt, enabled)
+            except ValueError as exc:
+                self._send_json(handler, {"error": str(exc)}, status=400)
+                return
+            state.enable_system_prompt = enabled
+
+            self._send_json(
+                handler,
+                {
+                    "enable_system_prompt": state.enable_system_prompt,
+                    "context_tokens": self._estimate_context_tokens(state.session.get_history()),
+                    "context_messages": self._serialize_context_messages(state.session.get_history()),
+                    "total_tokens": self._estimate_total_tokens(state.session),
+                },
+            )
+
     def _load_browser_preferences(self, settings: dict[str, Any]) -> dict[str, bool]:
         preferences: dict[str, bool] = {}
         for key, default in self.BROWSER_PREF_DEFAULTS.items():
@@ -1130,6 +1189,13 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
         request_payload: dict[str, Any],
         attachments: list[Any],
     ):
+        if state.epoch == 0 and isinstance(request_payload.get("enable_system_prompt"), bool):
+            state.enable_system_prompt = bool(request_payload.get("enable_system_prompt"))
+            state.session.set_initial_system_prompt(
+                prompts.Prompts.universe_task_prompt,
+                state.enable_system_prompt,
+            )
+
         selected_model = self._normalize_browser_model_id(request_payload.get("model", self.default_model)) or self.default_model
         selected_model = selected_model if self._model_exists(selected_model) else self.default_model
         previous_model = self._normalize_browser_model_id(state.selected_model)
@@ -1655,7 +1721,7 @@ class BrowserUIController(BrowserIndexPageMixin, BrowserCSSMixin, BrowserJSMixin
                 thinking_value,
                 normalized_selected_model,
             )
-            extra_kwargs["enable_image_thinking"] = True
+            extra_kwargs["enable_image_thinking"] = bool(extras.get("enable_image_thinking", True))
             requested_image_count = self._normalize_seedream_image_count(extras.get("max_images", 1))
             extra_kwargs["requested_image_count"] = requested_image_count
             if normalized_selected_model == "doubao-seedream-5-0-260128":
